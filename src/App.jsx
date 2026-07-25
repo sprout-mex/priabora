@@ -2,8 +2,6 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ── Supabase (cloud data layer) ───────────────────────────────────────────────
-console.log("SUPABASE_URL debug:", JSON.stringify(import.meta.env.VITE_SUPABASE_URL));
-console.log("SUPABASE_KEY debug:", JSON.stringify(import.meta.env.VITE_SUPABASE_ANON_KEY?.slice(0,20)), "...", JSON.stringify(import.meta.env.VITE_SUPABASE_ANON_KEY?.slice(-10)), "length:", import.meta.env.VITE_SUPABASE_ANON_KEY?.length);
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -393,17 +391,27 @@ function useLS(key, init) {
   const [val, setVal] = useState(() => {
     try { const s=localStorage.getItem(key); return s?JSON.parse(s):init; } catch { return init; }
   });
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
+    dirtyRef.current = false;
     let cancelled = false;
     (async () => {
       try {
         const { data, error } = await supabase.from("priabora_data").select("value").eq("key", key).maybeSingle();
-        if (cancelled) return;
+        if (cancelled || dirtyRef.current) return;
         if (error) throw error;
         if (data) {
-          setVal(data.value);
-          try { localStorage.setItem(key, JSON.stringify(data.value)); } catch {}
+          const incomingIsEmpty = data.value && typeof data.value === "object" && !Array.isArray(data.value) && Object.keys(data.value).length === 0;
+          let localHasContent = false;
+          try { const s = localStorage.getItem(key); if (s) { const parsed = JSON.parse(s); localHasContent = parsed && typeof parsed === "object" && Object.keys(parsed).length > 0; } } catch {}
+          if (incomingIsEmpty && localHasContent) {
+            const localVal = JSON.parse(localStorage.getItem(key));
+            supabase.from("priabora_data").upsert({ key, value: localVal }).then(({error})=>{ if(error) console.error("Repair upsert failed for", key, error); });
+          } else {
+            setVal(data.value);
+            try { localStorage.setItem(key, JSON.stringify(data.value)); } catch {}
+          }
         } else {
           let local = init;
           try { const s = localStorage.getItem(key); if (s) local = JSON.parse(s); } catch {}
@@ -419,6 +427,7 @@ function useLS(key, init) {
   }, [key]);
 
   const set = useCallback(v => {
+    dirtyRef.current = true;
     setVal(prev => {
       const next = typeof v==="function"?v(prev):v;
       try { localStorage.setItem(key,JSON.stringify(next)); } catch {}
