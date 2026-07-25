@@ -1,0 +1,186 @@
+{
+  "elem-override-10": {
+    "config": "[Ne] / [He]2s²2p⁶",
+    "atomicRadius": "154",
+    "electronegativity": "4.787",
+    "meltingPoint": "-248.59",
+    "boilingPoint": "-246.08",
+    "discoveredYear": "1898",
+    "discoveredBy": "William Ramsey & Morris M. Travers"
+  },
+  "elem-override-6": {
+    "config": "[He]2s²2p²",
+    "electronegativity": "2.55",
+    "meltingPoint": "3550 (Diamond)",
+    "boilingPoint": "3800 (sublimation)",
+    "discoveredYear": "Dunno"
+  },
+  "elem-override-24": {
+    "chemistryNotes": ""
+  },
+  "elem-override-7": {
+    "keyFact": "",
+    "electronegativity": "3.04",
+    "meltingPoint": "-210",
+    "boilingPoint": "-195.79",
+    "discoveredYear": "1772",
+    "discoveredBy": "Daniel Rutherford",
+    "config": "[He]2s²2p³"
+  },
+  "elem-override-8": {
+    "config": "[He]2s²2p⁴",
+    "electronegativity": "3.44",
+    "meltingPoint": "-218.79",
+    "boilingPoint": "-182.95",
+    "discoveredYear": "1774",
+    "discoveredBy": "Joseph Priestley"
+  },
+  "elem-override-23": {
+    "uses": []
+  },
+  "priabora-db": [
+    {
+      "id": 1,
+      "date": "2024-01-01",
+      "name": "Sodium Chloride",
+      "tags": [
+        "ionic",
+        "electrolyte",
+        "sodium",
+        "chlorine"
+      ],
+      "summary": "Ionic compound of Na⁺ and Cl⁻. mp 801°C. Classic ionic bonding example.",
+      "category": "Compound"
+    },
+    {
+      "id": 2,
+      "date": "2024-01-02",
+      "name": "SN2 Mechanism",
+      "tags": [
+        "nucleophilic",
+        "substitution",
+        "organic"
+      ],
+      "summary": "Bimolecular nucleophilic substitution. Backside attack, inversion of stereochemistry.",
+      "category": "Mechanism"
+    }
+  ],
+  "elem-override-2": {
+    "config": "1s²",
+    "atomicRadius": "140",
+    "electronegativity": "4.16",
+    "meltingPoint": "-272.2",
+    "boilingPoint": "-268.93",
+    "discoveredBy": "Pierre-Jules-Cesar Janssen",
+    "discoveredYear": "1868"
+  },
+  "elem-override-31": {
+    "commonCompounds": []
+  },
+  "elem-override-4": {
+    "group": "",
+    "config": "[He]2s²",
+    "electronegativity": "1.57",
+    "meltingPoint": "1287",
+    "boilingPoint": "2469",
+    "discoveredBy": "Nicholas-Louis Vauquelin",
+    "discoveredYear": "1797"
+  },
+  "priabora-reports": [
+    {
+      "id": 1,
+      "date": "2024-02-01",
+      "tags": [
+        "organic",
+        "purification",
+        "carbon"
+      ],
+      "title": "Recrystallisation of Aspirin",
+      "method": "Dissolved crude aspirin in minimum hot ethanol. Added warm distilled water until cloudy. Cooled slowly on ice. Filtered under vacuum.",
+      "results": "Recovery: 88.3%. MP now close to literature value.",
+      "aiSummary": null,
+      "dataTable": [
+        [
+          "Sample",
+          "Mass (g)",
+          "MP (°C)"
+        ],
+        [
+          "Crude",
+          "2.14",
+          "118-124"
+        ],
+        [
+          "Recrystallised",
+          "1.89",
+          "133-135"
+        ]
+      ],
+      "conclusion": "Recrystallisation successfully purified the aspirin sample.",
+      "discussion": "Broadened MP of crude sample indicates impurities. Recrystallisation narrowed and raised the MP.",
+      "linkedDbIds": [],
+      "linkedSpectra": []
+    }
+  ],
+  "elem-override-1": {
+    "boilingPoint": "-252.87 ",
+    "electronegativity": "2.2",
+    "config": "1s¹",
+    "discoveredYear": "1766",
+    "meltingPoint": "-259.16",
+    "discoveredBy": "Henry Cavendish ",
+    "atomicRadius": "31 (5)"
+  },
+  "elem-override-11": {
+    "config": "[Ne]3s¹"
+  },
+  "elem-override-9": {
+    "config": "[He]2s²2p⁵",
+    "electronegativity": "3.98",
+    "meltingPoint": "-219.62",
+    "boilingPoint": "-188.11",
+    "discoveredYear": "1771",
+    "discoveredBy": "Carl-Wilhelm Scheele"
+  },
+  "elem-note-12": "",
+  "priabora-notes": [
+    {
+      "id": 1,
+      "date": "2024-01-15",
+      "tags": [
+        "titration",
+        "acid-base",
+        "sodium"
+      ],
+      "title": "Acid-Base Titration Lab",
+      "content": "Titration of unknown HCl with 0.1M NaOH. Endpoint at 23.4mL. [HCl] = 0.117M.",
+      "aiSummary": null
+    }
+  ],
+  "elem-override-15": {
+    "keyFact": "Used in bulbs "
+  },
+  "elem-override-12": {
+    "config": ""
+  },
+  "elem-override-26": {
+    "discoveredBy": ""
+  },
+  "elem-override-3": {
+    "discoveredYear": "1818",
+    "config": "[He]2s¹",
+    "atomicRadius": "152",
+    "meltingPoint": "180.5",
+    "boilingPoint": "1342",
+    "electronegativity": "0.98",
+    "discoveredBy": "Johan August Arfwedson"
+  },
+  "elem-override-5": {
+    "config": "[He]2s²2p¹",
+    "electronegativity": "2.04",
+    "meltingPoint": "2076",
+    "boilingPoint": "3927",
+    "discoveredBy": "Joseph-Louis Gay-Lussac & Louis-Jacques Thenard",
+    "discoveredYear": "1808"
+  }
+}
