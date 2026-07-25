@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ── Supabase (cloud data layer) ───────────────────────────────────────────────
+console.log("SUPABASE_URL debug:", JSON.stringify(import.meta.env.VITE_SUPABASE_URL));
+console.log("SUPABASE_KEY debug:", JSON.stringify(import.meta.env.VITE_SUPABASE_ANON_KEY?.slice(0,20)), "...", JSON.stringify(import.meta.env.VITE_SUPABASE_ANON_KEY?.slice(-10)), "length:", import.meta.env.VITE_SUPABASE_ANON_KEY?.length);
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
