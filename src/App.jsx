@@ -273,6 +273,21 @@ const ELEMENTS = [
 const EGRID = {};
 ELEMENTS.forEach(e => { if(!EGRID[e.period]) EGRID[e.period]={}; EGRID[e.period][e.group]=e; });
 
+// Finds which items in a list (DB entries / Reports / Notebook entries) are textually
+// mentioned by name/title in arbitrary text — same word-bounded matching as element
+// detection. excludeId lets an entry skip matching itself when scanning its own list.
+function entriesMentionedIn(list, nameKey, excludeId, ...parts) {
+  const combined = parts.filter(Boolean).join(" \n ");
+  if (!combined || !list) return [];
+  return list.filter(item => {
+    if (excludeId != null && item.id === excludeId) return false;
+    const label = item[nameKey];
+    if (!label || !label.trim()) return false;
+    const re = new RegExp(`\\b${_escRe(label.trim())}\\b`, "i");
+    return re.test(combined);
+  });
+}
+
 // Finds which periodic-table elements are mentioned in arbitrary text (name or symbol),
 // using the same word-bounded logic as ElementPanel's own linking (avoids false positives
 // like "Li" inside "nucleophilic", but still catches formula-style text like "LiCl").
@@ -731,6 +746,159 @@ function LinkPickerModal({dbEntries,spectraResults,currentLinkedSpectra,currentL
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// LINK SUGGEST MODAL — shown at save time when text mentions are detected.
+// Nothing is linked automatically; every match starts unticked and the person
+// opts in per-item, then confirms (or skips) before the entry actually saves.
+// ═══════════════════════════════════════════════════════════════════════════════
+function LinkSuggestModal({elements=[],dbEntries=[],reports=[],notes=[],allDbEntries=[],allReports=[],allNotes=[],excludeElements=[],onConfirm,onSkip,mode="save",title}) {
+  const [selEl,setSelEl]=useState([]);
+  const [selDb,setSelDb]=useState([]);
+  const [selRep,setSelRep]=useState([]);
+  const [selNote,setSelNote]=useState([]);
+  const [manualEl,setManualEl]=useState([]);
+  const [manualDb,setManualDb]=useState([]);
+  const [manualRep,setManualRep]=useState([]);
+  const [manualNote,setManualNote]=useState([]);
+  const [search,setSearch]=useState("");
+  const isMobile=useIsMobile();
+  const toggle=setter=>id=>setter(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const total=selEl.length+selDb.length+selRep.length+selNote.length;
+
+  const shownElIds=new Set([...elements.map(e=>e.n),...manualEl.map(e=>e.n),...excludeElements]);
+  const shownDbIds=new Set([...dbEntries.map(e=>e.id),...manualDb.map(e=>e.id)]);
+  const shownRepIds=new Set([...reports.map(e=>e.id),...manualRep.map(e=>e.id)]);
+  const shownNoteIds=new Set([...notes.map(e=>e.id),...manualNote.map(e=>e.id)]);
+
+  const q=search.trim().toLowerCase();
+  const searchResults = q.length>0 ? {
+    el: ELEMENTS.filter(e=>!shownElIds.has(e.n)&&(e.name.toLowerCase().includes(q)||e.sym.toLowerCase().includes(q))).slice(0,6),
+    db: allDbEntries.filter(e=>!shownDbIds.has(e.id)&&e.name.toLowerCase().includes(q)).slice(0,6),
+    rep: allReports.filter(e=>!shownRepIds.has(e.id)&&e.title.toLowerCase().includes(q)).slice(0,6),
+    note: allNotes.filter(e=>!shownNoteIds.has(e.id)&&e.title.toLowerCase().includes(q)).slice(0,6),
+  } : null;
+  const hasResults = searchResults && (searchResults.el.length+searchResults.db.length+searchResults.rep.length+searchResults.note.length>0);
+
+  const addManualEl=el=>{setManualEl(p=>[...p,el]);setSelEl(p=>[...p,el.n]);setSearch("");};
+  const addManualDb=e=>{setManualDb(p=>[...p,e]);setSelDb(p=>[...p,e.id]);setSearch("");};
+  const addManualRep=r=>{setManualRep(p=>[...p,r]);setSelRep(p=>[...p,r.id]);setSearch("");};
+  const addManualNote=n=>{setManualNote(p=>[...p,n]);setSelNote(p=>[...p,n.id]);setSearch("");};
+
+  const displayEl=[...elements,...manualEl];
+  const displayDb=[...dbEntries,...manualDb];
+  const displayRep=[...reports,...manualRep];
+  const displayNote=[...notes,...manualNote];
+
+  const Row=({checked,onChange,color,children})=>(
+    <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:6,background:checked?color+"12":C.surface,border:`1px solid ${checked?color+"40":C.border}`,marginBottom:6,cursor:"pointer"}}>
+      <input type="checkbox" checked={checked} onChange={onChange} style={{accentColor:color,width:16,height:16,flexShrink:0}}/>
+      {children}
+    </label>
+  );
+  const SearchHit=({onClick,children})=>(
+    <button onClick={onClick} style={{display:"flex",alignItems:"center",gap:8,background:C.surface,border:`1px solid ${C.border}`,borderRadius:5,padding:"8px 10px",fontFamily:mono,fontSize:11,color:C.text,textAlign:"left",width:"100%"}}>
+      {children}<span style={{marginLeft:"auto",color:C.orange,fontSize:9,flexShrink:0}}>+ add</span>
+    </button>
+  );
+
+  const inner=(
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <p style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.7}}>{mode==="save"?"Found mentions of these existing entries in the text. Tick any you'd like to link — nothing is linked automatically.":"Search for anything to link to this entry."}</p>
+      {displayEl.length>0&&<div><SLabel accent={C.blue}>Elements</SLabel>{displayEl.map(el=>{const col=ELEM_CAT[el.cat]||C.blue;return(
+        <Row key={"el"+el.n} checked={selEl.includes(el.n)} onChange={()=>toggle(setSelEl)(el.n)} color={col}>
+          <span style={{fontFamily:serif,fontSize:13,color:col,fontWeight:700,width:26}}>{el.sym}</span>
+          <span style={{fontFamily:mono,fontSize:12,color:C.text}}>{el.name}</span>
+        </Row>
+      );})}</div>}
+      {displayDb.length>0&&<div><SLabel accent={C.green}>Reference Database</SLabel>{displayDb.map(e=>(
+        <Row key={"db"+e.id} checked={selDb.includes(e.id)} onChange={()=>toggle(setSelDb)(e.id)} color={C.green}>
+          <span style={{fontFamily:serif,fontSize:13,color:C.text,fontWeight:600}}>{e.name}</span>
+        </Row>
+      ))}</div>}
+      {displayRep.length>0&&<div><SLabel accent={C.teal}>Lab Reports</SLabel>{displayRep.map(r=>(
+        <Row key={"rep"+r.id} checked={selRep.includes(r.id)} onChange={()=>toggle(setSelRep)(r.id)} color={C.teal}>
+          <span style={{fontFamily:serif,fontSize:13,color:C.text,fontWeight:600}}>{r.title}</span>
+        </Row>
+      ))}</div>}
+      {displayNote.length>0&&<div><SLabel accent={C.purple}>Notebook</SLabel>{displayNote.map(n=>(
+        <Row key={"note"+n.id} checked={selNote.includes(n.id)} onChange={()=>toggle(setSelNote)(n.id)} color={C.purple}>
+          <span style={{fontFamily:serif,fontSize:13,color:C.text,fontWeight:600}}>{n.title}</span>
+        </Row>
+      ))}</div>}
+      <div>
+        <SLabel accent={C.orange}>Add manually</SLabel>
+        <Input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search elements, DB, reports, notes…"/>
+        {q.length>0&&(hasResults?(
+          <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5,maxHeight:200,overflowY:"auto"}}>
+            {searchResults.el.map(el=>{const col=ELEM_CAT[el.cat]||C.blue;return(
+              <SearchHit key={"sel"+el.n} onClick={()=>addManualEl(el)}><span style={{color:col,fontWeight:700,fontFamily:serif}}>{el.sym}</span>{el.name}</SearchHit>
+            );})}
+            {searchResults.db.map(e=><SearchHit key={"sdb"+e.id} onClick={()=>addManualDb(e)}>◈ {e.name}</SearchHit>)}
+            {searchResults.rep.map(r=><SearchHit key={"srep"+r.id} onClick={()=>addManualRep(r)}>⊞ {r.title}</SearchHit>)}
+            {searchResults.note.map(n=><SearchHit key={"snote"+n.id} onClick={()=>addManualNote(n)}>◻ {n.title}</SearchHit>)}
+          </div>
+        ):<p style={{fontFamily:mono,fontSize:10,color:C.faint,marginTop:6}}>No matches.</p>)}
+      </div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <Btn onClick={onSkip} accent={C.muted} small outlined>{mode==="save"?"Skip & save":"Close"}</Btn>
+        <Btn onClick={()=>onConfirm({elements:selEl,db:selDb,reports:selRep,notes:selNote})} accent={C.teal} small disabled={mode==="manage"&&total===0}>{mode==="save"?(total>0?`Link ${total} & save`:"Save"):(total>0?`Add ${total} link${total>1?"s":""}`:"Add links")}</Btn>
+      </div>
+    </div>
+  );
+  const modalTitle = title || (mode==="save"?"Link detected entries":"Add links");
+  if (isMobile) return <Sheet open onClose={onSkip} title={modalTitle}>{inner}</Sheet>;
+  return (
+    <div style={{position:"fixed",inset:0,background:"#000000bb",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:C.panel,border:`1px solid ${C.borderHi}`,borderRadius:12,width:"100%",maxWidth:480,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontFamily:serif,fontSize:15,color:C.text,fontWeight:700}}>{modalTitle}</span>
+          <button onClick={onSkip} style={{background:"none",border:"none",color:C.muted,fontSize:18}}>✕</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"16px 20px",flex:1}}>{inner}</div>
+      </div>
+    </div>
+  );
+}
+
+// Renders the explicit, user-confirmed links stored on an entry (as opposed to
+// ElementMentionPills, which is a live, read-only scan of the text — never stored).
+function LinkedEntriesDisplay({entry,dbEntries,reports,notes,onNavigate}) {
+  const els=(entry.linkedElements||[]).map(n=>ELEMENTS.find(e=>e.n===n)).filter(Boolean);
+  const dbs=(entry.linkedDbIds||[]).map(id=>(dbEntries||[]).find(e=>e.id===id)).filter(Boolean);
+  const reps=(entry.linkedReportIds||[]).map(id=>(reports||[]).find(r=>r.id===id)).filter(Boolean);
+  const nts=(entry.linkedNoteIds||[]).map(id=>(notes||[]).find(n=>n.id===id)).filter(Boolean);
+  if(!els.length&&!dbs.length&&!reps.length&&!nts.length) return null;
+  return (
+    <div>
+      <SLabel accent={C.orange}>Linked Entries</SLabel>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {els.map(el=>{const col=ELEM_CAT[el.cat]||C.blue;return(
+          <button key={"lel"+el.n} onClick={()=>onNavigate("table",{id:el.n})}
+            style={{display:"flex",alignItems:"center",gap:6,background:col+"14",border:`1px solid ${col}40`,borderRadius:5,padding:"6px 10px",fontFamily:mono,fontSize:11,transition:"all 0.12s"}}
+            onMouseEnter={e=>e.currentTarget.style.background=col+"25"} onMouseLeave={e=>e.currentTarget.style.background=col+"14"}>
+            <span style={{color:col,fontWeight:700,fontFamily:serif,fontSize:12}}>{el.sym}</span><span style={{color:C.muted}}>{el.name}</span>
+          </button>
+        );})}
+        {dbs.map(e=>(
+          <button key={"ldb"+e.id} onClick={()=>onNavigate("db",{id:e.id})}
+            style={{background:C.green+"14",border:`1px solid ${C.green}40`,borderRadius:5,padding:"6px 10px",fontFamily:mono,fontSize:11,color:C.muted,transition:"all 0.12s"}}
+            onMouseEnter={e2=>e2.currentTarget.style.background=C.green+"25"} onMouseLeave={e2=>e2.currentTarget.style.background=C.green+"14"}>◈ {e.name}</button>
+        ))}
+        {reps.map(r=>(
+          <button key={"lrep"+r.id} onClick={()=>onNavigate("reports",{id:r.id})}
+            style={{background:C.teal+"14",border:`1px solid ${C.teal}40`,borderRadius:5,padding:"6px 10px",fontFamily:mono,fontSize:11,color:C.muted,transition:"all 0.12s"}}
+            onMouseEnter={e2=>e2.currentTarget.style.background=C.teal+"25"} onMouseLeave={e2=>e2.currentTarget.style.background=C.teal+"14"}>⊞ {r.title}</button>
+        ))}
+        {nts.map(n=>(
+          <button key={"lnote"+n.id} onClick={()=>onNavigate("notebook",{id:n.id})}
+            style={{background:C.purple+"14",border:`1px solid ${C.purple}40`,borderRadius:5,padding:"6px 10px",fontFamily:mono,fontSize:11,color:C.muted,transition:"all 0.12s"}}
+            onMouseEnter={e2=>e2.currentTarget.style.background=C.purple+"25"} onMouseLeave={e2=>e2.currentTarget.style.background=C.purple+"14"}>◻ {n.title}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PERIODIC TABLE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 function ElementTile({el,selected,dimmed,onClick,size=42}){
@@ -752,6 +920,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
   const [override,setOverride]=useLS(`elem-override-${el.n}`,{});
   const [linkFilter,setLinkFilter]=useState("all"); // all | db | reports | notebook
   const [linkSort,setLinkSort]=useState("recent"); // recent | alpha | type
+  const [linkSearch,setLinkSearch]=useState("");
   // All element data is manually entered (e.g. from PubChem) — no AI auto-fill for the Periodic Table.
   const getField=k=>override[k];
   const saveField=(k,v)=>setOverride(p=>({...p,[k]:v}));
@@ -777,7 +946,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
     ...linkedReports.map(r=>({type:"reports",id:r.id,ref:r,title:r.title,date:r.date})),
     ...linkedNotes.map(n=>({type:"notebook",id:n.id,ref:n,title:n.title,date:n.date})),
   ];
-  const filteredLinkItems=linkFilter==="all"?allLinkItems:allLinkItems.filter(l=>l.type===linkFilter);
+  const filteredLinkItems=(linkFilter==="all"?allLinkItems:allLinkItems.filter(l=>l.type===linkFilter)).filter(l=>!linkSearch.trim()||(l.title||"").toLowerCase().includes(linkSearch.trim().toLowerCase()));
   const sortedLinkItems=[...filteredLinkItems].sort((a,b)=>{
     if(linkSort==="alpha") return (a.title||"").localeCompare(b.title||"");
     if(linkSort==="type") return LINK_TYPE_META[a.type].label.localeCompare(LINK_TYPE_META[b.type].label) || (a.title||"").localeCompare(b.title||"");
@@ -864,6 +1033,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
         </div>}
         {tab==="links"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:12}}>
           {totalLinks===0?<div style={{textAlign:"center",padding:"28px 10px",color:C.faint,fontFamily:mono,fontSize:11,lineHeight:2}}>No entries mention {el.name} yet.<br/><span style={{color:C.muted}}>Add entries to see them here.</span></div>:<>
+            <Input value={linkSearch} onChange={e=>setLinkSearch(e.target.value)} placeholder="Search linked entries…"/>
             <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
               {LINK_FILTERS.map(f=>{const cnt=f.id==="all"?allLinkItems.length:allLinkItems.filter(l=>l.type===f.id).length;const active=linkFilter===f.id;const fcol=f.id==="all"?col:LINK_TYPE_META[f.id].color;return(
                 <button key={f.id} onClick={()=>setLinkFilter(f.id)} disabled={cnt===0&&f.id!=="all"} style={{background:active?fcol+"22":C.surface,border:`1px solid ${active?fcol+"66":C.border}`,borderRadius:5,color:cnt===0&&f.id!=="all"?C.faint:active?fcol:C.muted,padding:"5px 9px",fontFamily:mono,fontSize:10,fontWeight:500,opacity:cnt===0&&f.id!=="all"?0.4:1,transition:"all 0.12s"}}>{f.label} ({cnt})</button>
@@ -1072,8 +1242,11 @@ function PhotoPicker({photos,onChange,entryId}){
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATABASE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function DatabaseModule({addEntryRef,openId,onOpened,onNavigate}) {
+function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) {
   const [entries,setEntries]=useCloudCollection("db",SEED_DB);
+  const [pendingSave,setPendingSave]=useState(null);
+  const [suggestData,setSuggestData]=useState(null);
+  const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const [categories,setCategories]=useLS("priabora-categories",DEFAULT_CATEGORIES);
   const [subcategories,setSubcategories]=useLS("priabora-subcategories",[]);
   const [search,setSearch]=useState("");const [filterCat,setFilterCat]=useState("All");
@@ -1104,13 +1277,47 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate}) {
   const toggleSub=id=>setDraft(d=>({...d,subcategories:d.subcategories.includes(id)?d.subcategories.filter(x=>x!==id):[...d.subcategories,id]}));
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
   const addNewSubcategoryToDraft=label=>{if(!subcategories.some(s=>s.id===label)){setSubcategories(p=>[...p,{id:label,label}]);}setDraft(d=>d.subcategories.includes(label)?d:{...d,subcategories:[...d.subcategories,label]});};
+  const finalizeSave=saved=>{
+    if(mode==="new"){setEntries(p=>[saved,...p]);setSelected(saved);}
+    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));setSelected(saved);}
+    setMode("view");
+  };
   const saveEntry=()=>{
     if(!draft.name.trim())return;
     const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
     delete saved.tagsStr; delete saved.category;
-    if(mode==="new"){setEntries(p=>[saved,...p]);setSelected(saved);}
-    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));setSelected(saved);}
-    setMode("view");
+    const text=[saved.name,saved.summary,saved.history,saved.generalInfo,(saved.tags||[]).join(" ")];
+    const els=elementsMentionedIn(...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
+    const dbM=entriesMentionedIn(entries,"name",saved.id,...text).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
+    const repM=entriesMentionedIn(reports,"title",null,...text).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
+    const noteM=entriesMentionedIn(notes,"title",null,...text).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
+    const allDb=entries.filter(e=>e.id!==saved.id&&!(saved.linkedDbIds||[]).includes(e.id));
+    const allRep=(reports||[]).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
+    const allNote=(notes||[]).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
+    if(els.length+dbM.length+repM.length+noteM.length===0){finalizeSave(saved);return;}
+    setPendingSave(saved);
+    setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
+  };
+  const confirmSuggested=sel=>{
+    const merged={...pendingSave,
+      linkedElements:[...new Set([...(pendingSave.linkedElements||[]),...sel.elements])],
+      linkedDbIds:[...new Set([...(pendingSave.linkedDbIds||[]),...sel.db])],
+      linkedReportIds:[...new Set([...(pendingSave.linkedReportIds||[]),...sel.reports])],
+      linkedNoteIds:[...new Set([...(pendingSave.linkedNoteIds||[]),...sel.notes])],
+    };
+    finalizeSave(merged);setPendingSave(null);setSuggestData(null);
+  };
+  const skipSuggested=()=>{finalizeSave(pendingSave);setPendingSave(null);setSuggestData(null);};
+  const addManualLinks=sel=>{
+    if(!selected)return;
+    const patch={
+      linkedElements:[...new Set([...(selected.linkedElements||[]),...sel.elements])],
+      linkedDbIds:[...new Set([...(selected.linkedDbIds||[]),...sel.db])],
+      linkedReportIds:[...new Set([...(selected.linkedReportIds||[]),...sel.reports])],
+      linkedNoteIds:[...new Set([...(selected.linkedNoteIds||[]),...sel.notes])],
+    };
+    updateEntry(selected.id,patch);
+    setManualLinkOpen(false);
   };
 
   const detailContent=selected&&mode==="view"&&(
@@ -1123,10 +1330,11 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate}) {
       <div><SLabel accent={C.yellow}>History</SLabel><EditableText tag="p" value={selected.history||""} onSave={v=>updateEntry(selected.id,{history:v})} multiline placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/></div>
       <div><SLabel accent={C.pink}>General Info</SLabel><EditableText tag="p" value={selected.generalInfo||""} onSave={v=>updateEntry(selected.id,{generalInfo:v})} multiline placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/></div>
       <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,selected.history,selected.generalInfo,(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
+      <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
       {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt="" onClick={()=>window.open(p.url||p.dataUrl,"_blank")} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
       <p style={{fontFamily:mono,fontSize:10,color:C.faint}}>Added {selected.date}</p>
-      <div style={{display:"flex",gap:8}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>del(selected.id)} accent="#f87171" small outlined>Delete</Btn></div>
+      <div style={{display:"flex",gap:8}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={()=>del(selected.id)} accent="#f87171" small outlined>Delete</Btn></div>
     </div>
   );
 
@@ -1147,6 +1355,8 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate}) {
 
   return (
     <div style={{display:"flex",gap:16,height:"100%",minHeight:0}}>
+      {suggestData&&<LinkSuggestModal elements={suggestData.elements} dbEntries={suggestData.dbEntries} reports={suggestData.reports} notes={suggestData.notes} allDbEntries={suggestData.allDb} allReports={suggestData.allRep} allNotes={suggestData.allNote} excludeElements={pendingSave?.linkedElements||[]} onConfirm={confirmSuggested} onSkip={skipSuggested}/>}
+      {manualLinkOpen&&selected&&<LinkSuggestModal mode="manage" allDbEntries={entries.filter(e=>e.id!==selected.id&&!(selected.linkedDbIds||[]).includes(e.id))} allReports={(reports||[]).filter(r=>!(selected.linkedReportIds||[]).includes(r.id))} allNotes={(notes||[]).filter(n=>!(selected.linkedNoteIds||[]).includes(n.id))} excludeElements={selected.linkedElements||[]} onConfirm={addManualLinks} onSkip={()=>setManualLinkOpen(false)}/>}
       <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:12,overflowY:"auto"}}>
         <Btn onClick={startNew} accent={C.green} small>+ New entry</Btn>
         {/* Search + filter */}
@@ -1262,11 +1472,15 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTEBOOK MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function NotebookModule({openId,onOpened,onNavigate}) {
+function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
   const [draft,setDraft]=useState({title:"",content:"",tags:""});const [aiLoading,setAiLoading]=useState(false);
   const [showDetail,setShowDetail]=useState(false);
+  const [pendingSave,setPendingSave]=useState(null);
+  const [pendingKind,setPendingKind]=useState(null);
+  const [suggestData,setSuggestData]=useState(null);
+  const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const isMobile=useIsMobile();
   const openNote=n=>{setSel(n);setEditing(false);setShowDetail(true);};
   useEffect(()=>{
@@ -1276,8 +1490,46 @@ function NotebookModule({openId,onOpened,onNavigate}) {
     onOpened&&onOpened();
   },[openId]);
   const startNew=()=>{setDraft({title:"",content:"",tags:""});setCreating(true);setSel(null);setShowDetail(true);};
-  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null};setNotes(p=>[n,...p]);setSel(n);setCreating(false);};
-  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean)};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);setEditing(false);};
+  const finalizeSave=(n,kind)=>{
+    if(kind==="new"){setNotes(p=>[n,...p]);setSel(n);setCreating(false);}
+    else{setNotes(p=>p.map(x=>x.id===n.id?n:x));setSel(n);setEditing(false);}
+  };
+  const stageSave=(n,kind)=>{
+    const text=[n.title,n.content,(n.tags||[]).join(" ")];
+    const els=elementsMentionedIn(...text).filter(el=>!(n.linkedElements||[]).includes(el.n));
+    const dbM=entriesMentionedIn(dbEntries,"name",null,...text).filter(e=>!(n.linkedDbIds||[]).includes(e.id));
+    const repM=entriesMentionedIn(reports,"title",null,...text).filter(r=>!(n.linkedReportIds||[]).includes(r.id));
+    const noteM=entriesMentionedIn(notes,"title",n.id,...text).filter(x=>!(n.linkedNoteIds||[]).includes(x.id));
+    const allDb=(dbEntries||[]).filter(e=>!(n.linkedDbIds||[]).includes(e.id));
+    const allRep=(reports||[]).filter(r=>!(n.linkedReportIds||[]).includes(r.id));
+    const allNote=notes.filter(x=>x.id!==n.id&&!(n.linkedNoteIds||[]).includes(x.id));
+    if(els.length+dbM.length+repM.length+noteM.length===0){finalizeSave(n,kind);return;}
+    setPendingSave(n);setPendingKind(kind);
+    setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
+  };
+  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null};stageSave(n,"new");};
+  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean)};stageSave(u,"edit");};
+  const confirmSuggested=sel2=>{
+    const merged={...pendingSave,
+      linkedElements:[...new Set([...(pendingSave.linkedElements||[]),...sel2.elements])],
+      linkedDbIds:[...new Set([...(pendingSave.linkedDbIds||[]),...sel2.db])],
+      linkedReportIds:[...new Set([...(pendingSave.linkedReportIds||[]),...sel2.reports])],
+      linkedNoteIds:[...new Set([...(pendingSave.linkedNoteIds||[]),...sel2.notes])],
+    };
+    finalizeSave(merged,pendingKind);
+    setPendingSave(null);setSuggestData(null);setPendingKind(null);
+  };
+  const skipSuggested=()=>{finalizeSave(pendingSave,pendingKind);setPendingSave(null);setSuggestData(null);setPendingKind(null);};
+  const addManualLinks=sel2=>{
+    if(!sel)return;
+    const u={...sel,
+      linkedElements:[...new Set([...(sel.linkedElements||[]),...sel2.elements])],
+      linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...sel2.db])],
+      linkedReportIds:[...new Set([...(sel.linkedReportIds||[]),...sel2.reports])],
+      linkedNoteIds:[...new Set([...(sel.linkedNoteIds||[]),...sel2.notes])],
+    };
+    setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);setManualLinkOpen(false);
+  };
   const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", ")});setEditing(true);};
   const del=id=>{setNotes(p=>p.filter(n=>n.id!==id));setSel(null);setShowDetail(false);};
   const aiSummarise=async()=>{if(!sel)return;setAiLoading(true);try{const t=await callClaude("You are a chemistry tutor. Summarise this lab note (3-4 sentences), highlight key chemistry, and suggest one follow-up question.",[{role:"user",content:`Title: ${sel.title}\n\n${sel.content}`}]);const u={...sel,aiSummary:t};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);}catch{}setAiLoading(false);};
@@ -1293,11 +1545,12 @@ function NotebookModule({openId,onOpened,onNavigate}) {
       {sel&&!creating&&!editing&&<>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
           <div><div style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700,marginBottom:3}}>{sel.title}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}</div></div>
-          <div style={{display:"flex",gap:6}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>del(sel.id)} accent="#f87171" small outlined>Delete</Btn></div>
+          <div style={{display:"flex",gap:6}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={()=>del(sel.id)} accent="#f87171" small outlined>Delete</Btn></div>
         </div>
         {sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.purple} small/>)}</div>}
         <div style={{fontFamily:mono,fontSize:15,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap",borderLeft:`3px solid ${C.border}`,paddingLeft:12}}>{sel.content}</div>
         <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.content,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
+        <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
         {sel.aiSummary?<Card style={{padding:14,border:`1px solid ${C.purple}33`,borderLeft:`3px solid ${C.purple}`}}><SLabel accent={C.purple}>AI Summary</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}>{sel.aiSummary}</p></Card>:<Btn onClick={aiSummarise} disabled={aiLoading} accent={C.purple} small full>{aiLoading?"Summarising…":"✦ Get AI tutor summary"}</Btn>}
       </>}
       {sel&&editing&&<>
@@ -1311,6 +1564,8 @@ function NotebookModule({openId,onOpened,onNavigate}) {
 
   return (
     <div style={{height:"100%",overflow:"hidden",display:"flex",flexDirection:"column",gap:12}}>
+      {suggestData&&<LinkSuggestModal elements={suggestData.elements} dbEntries={suggestData.dbEntries} reports={suggestData.reports} notes={suggestData.notes} allDbEntries={suggestData.allDb} allReports={suggestData.allRep} allNotes={suggestData.allNote} excludeElements={pendingSave?.linkedElements||[]} onConfirm={confirmSuggested} onSkip={skipSuggested}/>}
+      {manualLinkOpen&&sel&&<LinkSuggestModal mode="manage" allDbEntries={(dbEntries||[]).filter(e=>!(sel.linkedDbIds||[]).includes(e.id))} allReports={(reports||[]).filter(r=>!(sel.linkedReportIds||[]).includes(r.id))} allNotes={notes.filter(n=>n.id!==sel.id&&!(sel.linkedNoteIds||[]).includes(n.id))} excludeElements={sel.linkedElements||[]} onConfirm={addManualLinks} onSkip={()=>setManualLinkOpen(false)}/>}
       <Btn onClick={startNew} accent={C.green} small>+ New entry</Btn>
       <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:8}}>
         {notes.length===0&&<div style={{fontFamily:mono,fontSize:11,color:C.faint,textAlign:"center",paddingTop:20}}>No entries yet</div>}
@@ -1342,11 +1597,14 @@ function DataTableEditor({table,onChange}){
   const setCell=(i,j,v)=>onChange(table.map((r,ri)=>r.map((c,ci)=>ri===i&&ci===j?v:c)));
   return<div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{border:`1px solid ${C.border}`,padding:0}}><input value={cell} onChange={e=>setCell(i,j,e.target.value)} onKeyDown={e=>handleScriptKeyDown(e,cell,ev=>setCell(i,j,ev.target.value))} style={{background:i===0?C.surface+"cc":C.surface,border:"none",padding:"8px 9px",color:i===0?C.text:C.muted,fontFamily:mono,fontSize:11,fontWeight:i===0?600:400,width:"100%",minWidth:80}}/></td>)}<td style={{padding:"0 4px"}}><button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.faint,fontSize:12}}>✕</button></td></tr>)}</tbody></table><div style={{display:"flex",gap:6,marginTop:8}}><Btn onClick={addRow} accent={C.muted} small outlined>+ Row</Btn><Btn onClick={addCol} accent={C.muted} small outlined>+ Col</Btn></div></div>;
 }
-function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate}){
+function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes}){
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [sel,setSel]=useState(null);const [mode,setMode]=useState("view");const [draft,setDraft]=useState(null);
   const [showLink,setShowLink]=useState(false);const [aiLoading,setAiLoading]=useState(false);
   const [showDetail,setShowDetail]=useState(false);
+  const [pendingSave,setPendingSave]=useState(null);
+  const [suggestData,setSuggestData]=useState(null);
+  const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const isMobile=useIsMobile();
   const spectraResults=spectraResultsRef?.current||[];
   const startNew=()=>{setDraft({...BLANK_REPORT(),tagsStr:""});setSel(null);setMode("new");setShowDetail(true);};
@@ -1357,7 +1615,43 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     onOpened&&onOpened();
   },[openId]);
   const startEdit=()=>{setDraft({...sel,tagsStr:sel.tags.join(", ")});setMode("edit");};
-  const saveReport=()=>{if(!draft?.title?.trim())return;const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};delete saved.tagsStr;if(mode==="new"){setReports(p=>[saved,...p]);setSel(saved);}else{setReports(p=>p.map(r=>r.id===saved.id?saved:r));setSel(saved);}setMode("view");};
+  const finalizeSave=saved=>{if(mode==="new"){setReports(p=>[saved,...p]);setSel(saved);}else{setReports(p=>p.map(r=>r.id===saved.id?saved:r));setSel(saved);}setMode("view");};
+  const saveReport=()=>{
+    if(!draft?.title?.trim())return;
+    const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
+    delete saved.tagsStr;
+    const text=[saved.title,saved.method,saved.results,saved.discussion,saved.conclusion,(saved.tags||[]).join(" ")];
+    const els=elementsMentionedIn(...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
+    const dbM=entriesMentionedIn(dbEntries,"name",null,...text).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
+    const repM=entriesMentionedIn(reports,"title",saved.id,...text).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
+    const noteM=entriesMentionedIn(notes,"title",null,...text).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
+    const allDb=(dbEntries||[]).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
+    const allRep=reports.filter(r=>r.id!==saved.id&&!(saved.linkedReportIds||[]).includes(r.id));
+    const allNote=(notes||[]).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
+    if(els.length+dbM.length+repM.length+noteM.length===0){finalizeSave(saved);return;}
+    setPendingSave(saved);
+    setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
+  };
+  const confirmSuggested=sel2=>{
+    const merged={...pendingSave,
+      linkedElements:[...new Set([...(pendingSave.linkedElements||[]),...sel2.elements])],
+      linkedDbIds:[...new Set([...(pendingSave.linkedDbIds||[]),...sel2.db])],
+      linkedReportIds:[...new Set([...(pendingSave.linkedReportIds||[]),...sel2.reports])],
+      linkedNoteIds:[...new Set([...(pendingSave.linkedNoteIds||[]),...sel2.notes])],
+    };
+    finalizeSave(merged);setPendingSave(null);setSuggestData(null);
+  };
+  const skipSuggested=()=>{finalizeSave(pendingSave);setPendingSave(null);setSuggestData(null);};
+  const addManualLinks=sel2=>{
+    if(!sel)return;
+    const u={...sel,
+      linkedElements:[...new Set([...(sel.linkedElements||[]),...sel2.elements])],
+      linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...sel2.db])],
+      linkedReportIds:[...new Set([...(sel.linkedReportIds||[]),...sel2.reports])],
+      linkedNoteIds:[...new Set([...(sel.linkedNoteIds||[]),...sel2.notes])],
+    };
+    setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setManualLinkOpen(false);
+  };
   const deleteReport=()=>{setReports(p=>p.filter(r=>r.id!==sel.id));setSel(null);setShowDetail(false);setMode("view");};
   const confirmLinks=(selS,selD)=>{const u={...sel,linkedSpectra:[...new Set([...(sel.linkedSpectra||[]),...selS])],linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...selD])]};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setShowLink(false);};
   const aiReview=async()=>{if(!sel)return;setAiLoading(true);const content=`Title:${sel.title}\nMethod:${sel.method}\nResults:${sel.results}\nDiscussion:${sel.discussion}\nConclusion:${sel.conclusion}`;try{const t=await callClaude("You are a chemistry tutor reviewing a first-year lab report. Give a concise review (4-5 sentences): what is done well, any scientific errors, one suggestion, one follow-up question.",[{role:"user",content}]);const u={...sel,aiSummary:t};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);}catch{}setAiLoading(false);};
@@ -1368,10 +1662,11 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
         <div><div style={{fontFamily:serif,fontSize:19,color:C.text,fontWeight:700,marginBottom:4}}>{sel.title}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}</div>{sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.teal} small/>)}</div>}</div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><Btn onClick={()=>setShowLink(true)} accent={C.teal} small>⇢ Links</Btn><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={deleteReport} accent="#f87171" small outlined>Delete</Btn></div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><Btn onClick={()=>setShowLink(true)} accent={C.teal} small>⇢ Links</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={deleteReport} accent="#f87171" small outlined>Delete</Btn></div>
       </div>
       {(linkedDb.length>0||linkedSp.length>0)&&<Card style={{padding:12}}><SLabel accent={C.teal}>Linked Entries</SLabel><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{linkedDb.map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:6,background:C.green+"12",border:`1px solid ${C.green}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.green,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{e.name}</span></div>)}{linkedSp.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",gap:6,background:C.blue+"12",border:`1px solid ${C.blue}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.blue,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{s.name}</span></div>)}</div></Card>}
       <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.method,sel.results,sel.discussion,sel.conclusion,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
+      <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {sel.method&&<Card style={{padding:14}}><SLabel accent={C.purple}>Method</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.method}</p></Card>}
       {sel.dataTable?.length>0&&<Card style={{padding:14}}><SLabel accent={C.yellow}>Raw Data</SLabel><div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{sel.dataTable.map((row,i)=><tr key={i} style={{background:i===0?C.surface+"aa":"transparent"}}>{row.map((cell,j)=><td key={j} style={{padding:"8px 10px",color:i===0?C.text:C.muted,fontWeight:i===0?600:400,border:`1px solid ${C.border}30`}}>{cell}</td>)}</tr>)}</tbody></table></div></Card>}
       {sel.results&&<Card style={{padding:14}}><SLabel accent={C.green}>Results</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.results}</p></Card>}
@@ -1397,6 +1692,8 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
   return (
     <div style={{height:"100%",overflow:"hidden",display:"flex",flexDirection:"column",gap:12}}>
       {showLink&&sel&&<LinkPickerModal title="Link entries to this report" dbEntries={dbEntries} spectraResults={reports} currentLinkedSpectra={sel.linkedSpectra||[]} currentLinkedDbIds={sel.linkedDbIds||[]} onConfirm={confirmLinks} onClose={()=>setShowLink(false)}/>}
+      {suggestData&&<LinkSuggestModal elements={suggestData.elements} dbEntries={suggestData.dbEntries} reports={suggestData.reports} notes={suggestData.notes} allDbEntries={suggestData.allDb} allReports={suggestData.allRep} allNotes={suggestData.allNote} excludeElements={pendingSave?.linkedElements||[]} onConfirm={confirmSuggested} onSkip={skipSuggested}/>}
+      {manualLinkOpen&&sel&&<LinkSuggestModal mode="manage" allDbEntries={(dbEntries||[]).filter(e=>!(sel.linkedDbIds||[]).includes(e.id))} allReports={reports.filter(r=>r.id!==sel.id&&!(sel.linkedReportIds||[]).includes(r.id))} allNotes={(notes||[]).filter(n=>!(sel.linkedNoteIds||[]).includes(n.id))} excludeElements={sel.linkedElements||[]} onConfirm={addManualLinks} onSkip={()=>setManualLinkOpen(false)}/>}
       <Btn onClick={startNew} accent={C.teal} small>+ New report</Btn>
       <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:8}}>
         {reports.length===0&&<div style={{fontFamily:mono,fontSize:11,color:C.faint,textAlign:"center",paddingTop:20}}>No reports yet</div>}
@@ -1477,10 +1774,10 @@ export default function App() {
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:isMobile?"14px 14px 80px":"20px 24px",position:"relative"}}>
           {tab==="table"   &&<PeriodicTableModule dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate} openElementN={navTarget?.tab==="table"?navTarget.id:null} onOpened={()=>setNavTarget(null)}/>}
-          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate}/>}
+          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes}/>}
           {tab==="spectrum"&&<SpectrumModule saveToDbRef={addToDbRef} spectraResultsRef={spectraResultsRef} dbEntries={dbEntries} reports={reports} setReports={setReports}/>}
-          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate}/>}
-          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate}/>}
+          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes}/>}
+          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports}/>}
         </div>
       </div>
 
