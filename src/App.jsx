@@ -60,11 +60,30 @@ const DEFAULT_CATEGORIES = [
   {id:"Reagent",label:"Reagent",color:C.orange},
 ];
 const CAT_PALETTE = [C.blue,C.green,C.pink,C.yellow,C.orange,C.purple,C.teal,C.red,"#818cf8","#f97316"];
+// Property fields shown for DB entries categorised as "Compound" — mirrors the Periodic
+// Table's Props tab pattern, but stored on the entry itself as entry.properties.
+const COMPOUND_PROPERTY_FIELDS = [
+  ["formula","Molecular Formula"],
+  ["molarMass","Molar Mass (g/mol)"],
+  ["meltingPoint","Melting Pt (°C)"],
+  ["boilingPoint","Boiling Pt (°C)"],
+  ["density","Density (g/cm³)"],
+  ["state","State at RT"],
+  ["solubility","Solubility"],
+  ["appearance","Appearance"],
+];
 const catColor=(id,categories)=> (categories||DEFAULT_CATEGORIES).find(c=>c.id===id)?.color || CAT_COLOR[id] || C.blue;
 const getEntryCats=e=> (e.categories&&e.categories.length) ? e.categories : (e.category?[e.category]:[]);
 const getEntrySubs=e=> e.subcategories||[];
 const mono  = "'Georgia', serif";
 const serif = "'Lora', serif";
+
+// ── Admin identity ─────────────────────────────────────────────────────────
+// Whoever types this exact name (case-insensitive) into the name prompt below
+// gets admin privileges — locking/unlocking entries. This is a client-side-only
+// soft check, not real authentication: fine for a small trusted group, not a
+// real security boundary. Change this to your own secret name.
+const ADMIN_NAME = "marcus brody";
 
 // ── Sub/superscript typing shortcuts ──────────────────────────────────────────
 // Ctrl/Cmd+Shift+= toggles superscript-typing mode; Ctrl/Cmd+Shift+- toggles subscript.
@@ -135,6 +154,21 @@ function useIsMobile() {
     return () => window.removeEventListener("resize", fn);
   }, []);
   return mobile;
+}
+
+// ── Local user identity ───────────────────────────────────────────────────────
+// The name someone types in on first visit. Deliberately local-only (browser
+// localStorage), never synced to Supabase — it's just a tag for attribution
+// ("added by ___", "locked by ___"), not a real account system.
+function useUsername() {
+  const [username, setUsernameState] = useState(() => {
+    try { return localStorage.getItem("priabora-username") || ""; } catch { return ""; }
+  });
+  const setUsername = useCallback(name => {
+    try { localStorage.setItem("priabora-username", name); } catch {}
+    setUsernameState(name);
+  }, []);
+  return [username, setUsername];
 }
 
 // ── Element category colours ──────────────────────────────────────────────────
@@ -572,6 +606,49 @@ function ElementMentionPills({elements,onNavigate}){
     </div>
   );
 }
+// Splits a module title into a white "first part" and orange "second part", matching the
+// Priabora logo treatment. Multi-word titles: first half of the words white, rest orange.
+// Single-word titles: split by letter count so the orange portion is the majority half.
+function splitTitleColor(text){
+  const words=(text||"").trim().split(" ");
+  if(words.length>1){
+    const mid=Math.ceil(words.length/2);
+    return {white:words.slice(0,mid).join(" "),orange:words.slice(mid).join(" "),joiner:" "};
+  }
+  const n=(text||"").length;
+  const whiteLen=Math.floor(n/2);
+  return {white:(text||"").slice(0,whiteLen),orange:(text||"").slice(whiteLen),joiner:""};
+}
+function TwoToneTitle({text,style}){
+  const {white,orange,joiner}=splitTitleColor(text);
+  return <span style={style}>{white&&<span style={{color:C.text}}>{white}</span>}{joiner}<span style={{color:C.orange}}>{orange}</span></span>;
+}
+// Editable properties grid for DB entries categorised as "Compound" — same visual
+// pattern as ElementPanel's Props tab (2-col grid of surface cards, click-to-edit).
+function CompoundPropsGrid({properties,onSave,readOnly}){
+  return (
+    <div>
+      <SLabel accent={C.blue}>Properties</SLabel>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+        {COMPOUND_PROPERTY_FIELDS.map(([key,label])=>(
+          <div key={key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
+            <div style={{fontFamily:mono,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>{label}</div>
+            <EditableText value={(properties||{})[key]||""} onSave={v=>onSave(key,v)} placeholder="—" readOnly={readOnly} style={{fontFamily:mono,fontSize:11,color:C.text,fontWeight:500}}/>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+// Small red pill shown on a locked entry — visible to everyone, not just admins.
+function LockBadge({lockedBy,small}){
+  if(!lockedBy) return null;
+  return <Pill label={`🔒 Locked by ${lockedBy}`} color={C.red} small={small}/>;
+}
+// Admin-only lock/unlock toggle, shown in an entry's detail view.
+function LockToggleBtn({locked,onToggle}){
+  return <Btn onClick={onToggle} accent={locked?C.green:C.red} small outlined>{locked?"🔓 Unlock entry":"🔒 Lock entry"}</Btn>;
+}
 function SaveIndicator(){
   const status = useSaveStatus();
   if(status==="idle") return null;
@@ -593,7 +670,7 @@ function Input({value,onChange,placeholder,style}){return <input value={value} o
 function Textarea({value,onChange,placeholder,rows=6}){return <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows} onKeyDown={e=>handleScriptKeyDown(e,value,onChange)} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"12px 13px",color:C.text,fontFamily:mono,fontSize:12,lineHeight:1.8,resize:"vertical",width:"100%"}}/>;}
 
 // ── EditableText: click any text to edit it inline ────────────────────────────
-function EditableText({value,onSave,placeholder,style,multiline,tag:Tag="div",renderDisplay}){
+function EditableText({value,onSave,placeholder,style,multiline,tag:Tag="div",renderDisplay,readOnly}){
   const [editing,setEditing]=useState(false);
   const [draft,setDraft]=useState(value||"");
   const [h,setH]=useState(false);
@@ -602,6 +679,10 @@ function EditableText({value,onSave,placeholder,style,multiline,tag:Tag="div",re
   useEffect(()=>{ if(editing&&ref.current){ ref.current.focus(); if(!multiline) ref.current.select(); } },[editing]);
   const commit=()=>{ setEditing(false); if(draft!==(value||"")) onSave(draft); };
   const cancel=()=>{ setDraft(value||""); setEditing(false); };
+  if(readOnly){
+    const empty2 = !value || value.length===0;
+    return <Tag style={{cursor:"default",...style}}>{renderDisplay ? renderDisplay(value) : (empty2 ? <span style={{color:C.faint,fontStyle:"italic"}}>{placeholder||"—"}</span> : value)}</Tag>;
+  }
   if(editing){
     const InputComp = multiline?"textarea":"input";
     return <InputComp ref={ref} value={draft} onChange={e=>setDraft(e.target.value)}
@@ -618,6 +699,27 @@ function EditableText({value,onSave,placeholder,style,multiline,tag:Tag="div",re
       style={{cursor:"text",borderBottom:`1px dashed ${h?C.muted:"transparent"}`,transition:"border-color 0.12s",...style}}>
       {renderDisplay ? renderDisplay(value) : (empty ? <span style={{color:C.faint,fontStyle:"italic"}}>{placeholder||"Click to add…"}</span> : value)}
     </Tag>
+  );
+}
+
+// ── Name gate: shown once per browser before the app is usable ───────────────
+function NameGate({ onSubmit }) {
+  const [val, setVal] = useState("");
+  const submit = () => { if (val.trim()) onSubmit(val.trim()); };
+  return (
+    <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, padding: 20 }}>
+      <GlobalStyles/>
+      <div className="fade-up" style={{ width: "100%", maxWidth: 340, display: "flex", flexDirection: "column", gap: 18, textAlign: "center" }}>
+        <div>
+          <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 700, color: C.text }}>Pria<span style={{ color: C.orange }}>bora</span></div>
+          <div style={{ fontFamily: mono, fontSize: 10, color: C.muted, marginTop: 4, letterSpacing: "0.07em" }}>CHEMISTRY SUITE</div>
+        </div>
+        <p style={{ fontFamily: mono, fontSize: 12, color: C.muted, lineHeight: 1.7 }}>What's your name? This tags anything you add so everyone can see who contributed what.</p>
+        <input autoFocus value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} placeholder="Your name…"
+          style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px 14px", color: C.text, fontFamily: mono, fontSize: 14, textAlign: "center" }}/>
+        <Btn onClick={submit} accent={C.orange} disabled={!val.trim()}>Continue</Btn>
+      </div>
+    </div>
   );
 }
 
@@ -646,6 +748,8 @@ const NAV = [
   {id:"reports", label:"Reports",  icon:"⊞"},
   {id:"notebook",label:"Notes",    icon:"◻"},
 ];
+// Full display title for a NAV label (short label -> expanded module name)
+const moduleTitle = l => l==="DB"?"Reference DB":l==="Spectra"?"Spectrum Analyser":l==="Table"?"Periodic Table":l;
 
 function BottomTabBar({tab, setTab, counts}) {
   return (
@@ -653,10 +757,10 @@ function BottomTabBar({tab, setTab, counts}) {
       {NAV.map(n=>{
         const active=tab===n.id;
         return (
-          <button key={n.id} onClick={()=>setTab(n.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"10px 4px 8px",background:"none",border:"none",color:active?C.teal:C.muted,transition:"color 0.12s"}}>
+          <button key={n.id} onClick={()=>setTab(n.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"10px 4px 8px",background:"none",border:"none",color:active?C.orange:C.muted,transition:"color 0.12s"}}>
             <span style={{fontSize:18,lineHeight:1}}>{n.icon}</span>
             <span style={{fontFamily:mono,fontSize:9,fontWeight:active?600:400,letterSpacing:"0.04em"}}>{n.label}</span>
-            {counts[n.id]>0&&<span style={{position:"absolute",top:6,width:14,height:14,borderRadius:"50%",background:C.teal,color:C.bg,fontFamily:mono,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{counts[n.id]>9?"9+":counts[n.id]}</span>}
+            {counts[n.id]>0&&<span style={{position:"absolute",top:6,width:14,height:14,borderRadius:"50%",background:C.orange,color:C.bg,fontFamily:mono,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{counts[n.id]>9?"9+":counts[n.id]}</span>}
           </button>
         );
       })}
@@ -665,25 +769,25 @@ function BottomTabBar({tab, setTab, counts}) {
 }
 
 // ── Desktop sidebar ───────────────────────────────────────────────────────────
-function Sidebar({tab, setTab, counts, open, onClose, isMobile}) {
+function Sidebar({tab, setTab, counts, open, onClose, isMobile, username, isAdmin, onSwitchUser}) {
   if (isMobile) {
     return (
       <>
         {open && <div onClick={onClose} className="fade-in" style={{position:"fixed",inset:0,background:"#000000aa",zIndex:150}}/>}
         <div className={open?"slide-in":""} style={{position:"fixed",top:0,left:0,bottom:0,width:260,background:C.surface,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",padding:"20px 0",zIndex:160,transform:open?"translateX(0)":"translateX(-100%)",transition:"transform 0.25s ease"}}>
-          <SidebarContent tab={tab} setTab={id=>{setTab(id);onClose();}} counts={counts}/>
+          <SidebarContent tab={tab} setTab={id=>{setTab(id);onClose();}} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser}/>
         </div>
       </>
     );
   }
   return (
     <div style={{width:218,flexShrink:0,borderRight:`1px solid ${C.border}`,background:C.surface,display:"flex",flexDirection:"column",padding:"20px 0"}}>
-      <SidebarContent tab={tab} setTab={setTab} counts={counts}/>
+      <SidebarContent tab={tab} setTab={setTab} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser}/>
     </div>
   );
 }
 
-function SidebarContent({tab, setTab, counts}) {
+function SidebarContent({tab, setTab, counts, username, isAdmin, onSwitchUser}) {
   return (
     <>
       <div style={{padding:"0 20px 24px"}}>
@@ -700,6 +804,13 @@ function SidebarContent({tab, setTab, counts}) {
         );})}
       </div>
       <div style={{padding:"16px 20px",borderTop:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+          <div style={{fontFamily:mono,fontSize:10,color:C.muted,display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+            <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{username}</span>
+            {isAdmin&&<Pill label="Admin" color={C.orange} small/>}
+          </div>
+          <button onClick={onSwitchUser} style={{background:"none",border:"none",color:C.faint,fontFamily:mono,fontSize:9,textDecoration:"underline",padding:0,flexShrink:0}}>switch</button>
+        </div>
         <div style={{fontFamily:mono,fontSize:9,color:C.faint,lineHeight:1.6}}>Synced to cloud.</div>
         <div style={{display:"flex",gap:6}}>
           <Btn onClick={exportAllData} accent={C.teal} small outlined full>Export</Btn>
@@ -1242,7 +1353,7 @@ function PhotoPicker({photos,onChange,entryId}){
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATABASE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) {
+function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,username,isAdmin}) {
   const [entries,setEntries]=useCloudCollection("db",SEED_DB);
   const [pendingSave,setPendingSave]=useState(null);
   const [suggestData,setSuggestData]=useState(null);
@@ -1257,7 +1368,11 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
   const isMobile=useIsMobile();
   const addEntry=useCallback(e=>setEntries(p=>[e,...p]),[setEntries]);
   useEffect(()=>{if(addEntryRef)addEntryRef.current=addEntry;},[addEntry,addEntryRef]);
-  const del=id=>{setEntries(p=>p.filter(e=>e.id!==id));setSelected(null);setShowDetail(false);setMode("view");};
+  const del=id=>{
+    const e=entries.find(x=>x.id===id);
+    if(e?.lockedBy&&!isAdmin)return; // locked entries can't be deleted by non-admins
+    setEntries(p=>p.filter(x=>x.id!==id));setSelected(null);setShowDetail(false);setMode("view");
+  };
   const openEntry=e=>{setSelected(e);setMode("view");setShowDetail(true);};
   useEffect(()=>{
     if(openId==null)return;
@@ -1265,14 +1380,19 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
     if(e)openEntry(e);
     onOpened&&onOpened();
   },[openId]);
-  const updateEntry=(id,patch)=>{setEntries(p=>p.map(e=>e.id===id?{...e,...patch}:e));setSelected(p=>p&&p.id===id?{...p,...patch}:p);};
+  const toggleLock=()=>{if(!isAdmin||!selected)return;updateEntry(selected.id,{lockedBy:selected.lockedBy?null:username},true);};
+  const updateEntry=(id,patch,fromAdminLockAction)=>{
+    const e=entries.find(x=>x.id===id);
+    if(e?.lockedBy&&!isAdmin&&!fromAdminLockAction)return; // locked entries can't be edited by non-admins
+    setEntries(p=>p.map(x=>x.id===id?{...x,...patch}:x));setSelected(p=>p&&p.id===id?{...p,...patch}:p);
+  };
   const filtered=entries.filter(e=>{const mc=filterCat==="All"||getEntryCats(e).includes(filterCat);const q=search.toLowerCase();return mc&&(!q||e.name.toLowerCase().includes(q)||e.summary.toLowerCase().includes(q)||e.tags.some(t=>t.includes(q)));});
 
   const addCategory=()=>{const label=newCatDraft.trim();if(!label){setAddingCat(false);return;}if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setAddingCat(false);setNewCatDraft("");};
 
-  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",date:new Date().toISOString().split("T")[0]});
+  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null});
   const startNew=()=>{setDraft(BLANK_DB_ENTRY());setSelected(null);setMode("new");setShowDetail(true);};
-  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[]});setMode("edit");};
+  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{}});setMode("edit");};
   const toggleCat=id=>setDraft(d=>({...d,categories:d.categories.includes(id)?d.categories.filter(x=>x!==id):[...d.categories,id]}));
   const toggleSub=id=>setDraft(d=>({...d,subcategories:d.subcategories.includes(id)?d.subcategories.filter(x=>x!==id):[...d.subcategories,id]}));
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
@@ -1310,6 +1430,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
   const skipSuggested=()=>{finalizeSave(pendingSave);setPendingSave(null);setSuggestData(null);};
   const addManualLinks=sel=>{
     if(!selected)return;
+    if(selected.lockedBy&&!isAdmin){setManualLinkOpen(false);return;}
     const patch={
       linkedElements:[...new Set([...(selected.linkedElements||[]),...sel.elements])],
       linkedDbIds:[...new Set([...(selected.linkedDbIds||[]),...sel.db])],
@@ -1320,21 +1441,29 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
     setManualLinkOpen(false);
   };
 
+  const dbLocked=!!selected?.lockedBy;
+  const dbCanEdit=!dbLocked||isAdmin;
   const detailContent=selected&&mode==="view"&&(
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}</div>
-      <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
-      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}`,paddingLeft:12}}><EditableText tag="p" value={selected.summary} onSave={v=>updateEntry(selected.id,{summary:v})} multiline placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/></div>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<LockBadge lockedBy={selected.lockedBy}/></div>
+      <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} readOnly={!dbCanEdit} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
+      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}`,paddingLeft:12}}><EditableText tag="p" value={selected.summary} onSave={v=>updateEntry(selected.id,{summary:v})} readOnly={!dbCanEdit} multiline placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/></div>
+      {getEntryCats(selected).includes("Compound")&&<CompoundPropsGrid properties={selected.properties} readOnly={!dbCanEdit} onSave={(k,v)=>updateEntry(selected.id,{properties:{...(selected.properties||{}),[k]:v}})}/>}
       {getEntrySubs(selected).length>0&&<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{getEntrySubs(selected).map(sid=><Pill key={sid} label={subcategories.find(s=>s.id===sid)?.label||sid} color={C.purple} small/>)}</div>}
       <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{selected.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
-      <div><SLabel accent={C.yellow}>History</SLabel><EditableText tag="p" value={selected.history||""} onSave={v=>updateEntry(selected.id,{history:v})} multiline placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/></div>
-      <div><SLabel accent={C.pink}>General Info</SLabel><EditableText tag="p" value={selected.generalInfo||""} onSave={v=>updateEntry(selected.id,{generalInfo:v})} multiline placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/></div>
+      <div><SLabel accent={C.yellow}>History</SLabel><EditableText tag="p" value={selected.history||""} onSave={v=>updateEntry(selected.id,{history:v})} readOnly={!dbCanEdit} multiline placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/></div>
+      <div><SLabel accent={C.pink}>General Info</SLabel><EditableText tag="p" value={selected.generalInfo||""} onSave={v=>updateEntry(selected.id,{generalInfo:v})} readOnly={!dbCanEdit} multiline placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/></div>
       <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,selected.history,selected.generalInfo,(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
       {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt="" onClick={()=>window.open(p.url||p.dataUrl,"_blank")} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
-      <p style={{fontFamily:mono,fontSize:10,color:C.faint}}>Added {selected.date}</p>
-      <div style={{display:"flex",gap:8}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={()=>del(selected.id)} accent="#f87171" small outlined>Delete</Btn></div>
+      <p style={{fontFamily:mono,fontSize:10,color:C.faint}}>Added {selected.date}{selected.createdBy?` · by ${selected.createdBy}`:""}</p>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {dbCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
+        {dbCanEdit&&<Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn>}
+        {dbCanEdit&&<Btn onClick={()=>del(selected.id)} accent="#f87171" small outlined>Delete</Btn>}
+        {isAdmin&&<LockToggleBtn locked={dbLocked} onToggle={toggleLock}/>}
+      </div>
     </div>
   );
 
@@ -1345,6 +1474,9 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
       <Input value={draft.tagsStr} onChange={e=>setDraft(d=>({...d,tagsStr:e.target.value}))} placeholder="Tags (comma-separated)…"/>
       <div><SLabel accent={C.blue}>Categories</SLabel><ChipPicker options={categories} selected={draft.categories} onToggle={toggleCat} onAddNew={addNewCategoryToDraft} color={C.blue}/></div>
       <div><SLabel accent={C.purple}>Subcategories</SLabel><ChipPicker options={subcategories} selected={draft.subcategories} onToggle={toggleSub} onAddNew={addNewSubcategoryToDraft} color={C.purple}/></div>
+      {draft.categories.includes("Compound")&&<div><SLabel accent={C.blue}>Properties</SLabel><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>{COMPOUND_PROPERTY_FIELDS.map(([key,label])=>(
+        <Input key={key} value={draft.properties?.[key]||""} onChange={e=>setDraft(d=>({...d,properties:{...d.properties,[key]:e.target.value}}))} placeholder={label}/>
+      ))}</div></div>}
       <div><SLabel accent={C.teal}>Links</SLabel><LinkListEditor links={draft.links} onChange={links=>setDraft(d=>({...d,links}))}/></div>
       <div><SLabel accent={C.green}>Photos</SLabel><PhotoPicker photos={draft.photos} onChange={photos=>setDraft(d=>({...d,photos}))} entryId={draft.id}/></div>
       <div><SLabel accent={C.yellow}>History</SLabel><Textarea value={draft.history||""} onChange={e=>setDraft(d=>({...d,history:e.target.value}))} placeholder="Historical background, discovery, notable events…" rows={4}/></div>
@@ -1383,6 +1515,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes}) 
               <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end",flexShrink:0}}>
                 {cats.length>0&&<Pill label={categories.find(c=>c.id===cats[0])?.label||cats[0]} color={col} small/>}
                 {cats.length>1&&<Pill label={`+${cats.length-1}`} color={C.muted} small/>}
+                <LockBadge lockedBy={e.lockedBy} small/>
               </div>
             </div>
             <p style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.6,marginBottom:7,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{e.summary}</p>
@@ -1472,10 +1605,11 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTEBOOK MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
+function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin}) {
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
   const [draft,setDraft]=useState({title:"",content:"",tags:""});const [aiLoading,setAiLoading]=useState(false);
+  const toggleLock=()=>{if(!isAdmin||!sel)return;const u={...sel,lockedBy:sel.lockedBy?null:username};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);};
   const [showDetail,setShowDetail]=useState(false);
   const [pendingSave,setPendingSave]=useState(null);
   const [pendingKind,setPendingKind]=useState(null);
@@ -1507,7 +1641,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
     setPendingSave(n);setPendingKind(kind);
     setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
   };
-  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null};stageSave(n,"new");};
+  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null,createdBy:username||"",lockedBy:null};stageSave(n,"new");};
   const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean)};stageSave(u,"edit");};
   const confirmSuggested=sel2=>{
     const merged={...pendingSave,
@@ -1522,6 +1656,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
   const skipSuggested=()=>{finalizeSave(pendingSave,pendingKind);setPendingSave(null);setSuggestData(null);setPendingKind(null);};
   const addManualLinks=sel2=>{
     if(!sel)return;
+    if(sel.lockedBy&&!isAdmin){setManualLinkOpen(false);return;}
     const u={...sel,
       linkedElements:[...new Set([...(sel.linkedElements||[]),...sel2.elements])],
       linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...sel2.db])],
@@ -1531,7 +1666,11 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
     setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);setManualLinkOpen(false);
   };
   const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", ")});setEditing(true);};
-  const del=id=>{setNotes(p=>p.filter(n=>n.id!==id));setSel(null);setShowDetail(false);};
+  const del=id=>{
+    const n=notes.find(x=>x.id===id);
+    if(n?.lockedBy&&!isAdmin)return;
+    setNotes(p=>p.filter(x=>x.id!==id));setSel(null);setShowDetail(false);
+  };
   const aiSummarise=async()=>{if(!sel)return;setAiLoading(true);try{const t=await callClaude("You are a chemistry tutor. Summarise this lab note (3-4 sentences), highlight key chemistry, and suggest one follow-up question.",[{role:"user",content:`Title: ${sel.title}\n\n${sel.content}`}]);const u={...sel,aiSummary:t};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);}catch{}setAiLoading(false);};
 
   const detailContent=(
@@ -1542,17 +1681,22 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
         <Textarea value={draft.content} onChange={e=>setDraft(d=>({...d,content:e.target.value}))} placeholder="Write your lab notes here…" rows={10}/>
         <div style={{display:"flex",gap:8}}><Btn onClick={saveNew} accent={C.green}>Save</Btn><Btn onClick={()=>{setCreating(false);setShowDetail(false);}} accent={C.muted} outlined>Cancel</Btn></div>
       </>}
-      {sel&&!creating&&!editing&&<>
+      {sel&&!creating&&!editing&&(()=>{const noteLocked=!!sel.lockedBy;const noteCanEdit=!noteLocked||isAdmin;return<>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-          <div><div style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700,marginBottom:3}}>{sel.title}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}</div></div>
-          <div style={{display:"flex",gap:6}}><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={()=>del(sel.id)} accent="#f87171" small outlined>Delete</Btn></div>
+          <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}><span style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{sel.title}</span><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div></div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {noteCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
+            {noteCanEdit&&<Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn>}
+            {noteCanEdit&&<Btn onClick={()=>del(sel.id)} accent="#f87171" small outlined>Delete</Btn>}
+            {isAdmin&&<LockToggleBtn locked={noteLocked} onToggle={toggleLock}/>}
+          </div>
         </div>
         {sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.purple} small/>)}</div>}
         <div style={{fontFamily:mono,fontSize:15,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap",borderLeft:`3px solid ${C.border}`,paddingLeft:12}}>{sel.content}</div>
         <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.content,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
         <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
         {sel.aiSummary?<Card style={{padding:14,border:`1px solid ${C.purple}33`,borderLeft:`3px solid ${C.purple}`}}><SLabel accent={C.purple}>AI Summary</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}>{sel.aiSummary}</p></Card>:<Btn onClick={aiSummarise} disabled={aiLoading} accent={C.purple} small full>{aiLoading?"Summarising…":"✦ Get AI tutor summary"}</Btn>}
-      </>}
+      </>;})()}
       {sel&&editing&&<>
         <Input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Title…" style={{fontFamily:serif,fontSize:14}}/>
         <Input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags…"/>
@@ -1572,7 +1716,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports}) {
         {notes.map(n=>(
           <div key={n.id} onClick={()=>openNote(n)} style={{background:sel?.id===n.id&&showDetail&&!isMobile?"#12172a":C.panel,border:`1px solid ${sel?.id===n.id&&showDetail&&!isMobile?C.blue+"55":C.border}`,borderRadius:7,padding:"12px 14px",cursor:"pointer",transition:"all 0.12s"}}
             onMouseEnter={e2=>e2.currentTarget.style.background="#0e1220"} onMouseLeave={e2=>e2.currentTarget.style.background=C.panel}>
-            <div style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600,marginBottom:4}}>{n.title}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{n.title}</span><LockBadge lockedBy={n.lockedBy} small/></div>
             <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginBottom:6}}>{n.date}</div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{n.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
           </div>
@@ -1597,7 +1741,7 @@ function DataTableEditor({table,onChange}){
   const setCell=(i,j,v)=>onChange(table.map((r,ri)=>r.map((c,ci)=>ri===i&&ci===j?v:c)));
   return<div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{border:`1px solid ${C.border}`,padding:0}}><input value={cell} onChange={e=>setCell(i,j,e.target.value)} onKeyDown={e=>handleScriptKeyDown(e,cell,ev=>setCell(i,j,ev.target.value))} style={{background:i===0?C.surface+"cc":C.surface,border:"none",padding:"8px 9px",color:i===0?C.text:C.muted,fontFamily:mono,fontSize:11,fontWeight:i===0?600:400,width:"100%",minWidth:80}}/></td>)}<td style={{padding:"0 4px"}}><button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.faint,fontSize:12}}>✕</button></td></tr>)}</tbody></table><div style={{display:"flex",gap:6,marginTop:8}}><Btn onClick={addRow} accent={C.muted} small outlined>+ Row</Btn><Btn onClick={addCol} accent={C.muted} small outlined>+ Col</Btn></div></div>;
 }
-function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes}){
+function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes,username,isAdmin}){
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [sel,setSel]=useState(null);const [mode,setMode]=useState("view");const [draft,setDraft]=useState(null);
   const [showLink,setShowLink]=useState(false);const [aiLoading,setAiLoading]=useState(false);
@@ -1607,7 +1751,8 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
   const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const isMobile=useIsMobile();
   const spectraResults=spectraResultsRef?.current||[];
-  const startNew=()=>{setDraft({...BLANK_REPORT(),tagsStr:""});setSel(null);setMode("new");setShowDetail(true);};
+  const startNew=()=>{setDraft({...BLANK_REPORT(),tagsStr:"",createdBy:username||"",lockedBy:null});setSel(null);setMode("new");setShowDetail(true);};
+  const toggleLock=()=>{if(!isAdmin||!sel)return;const u={...sel,lockedBy:sel.lockedBy?null:username};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);};
   useEffect(()=>{
     if(openId==null)return;
     const r=reports.find(x=>x.id===openId);
@@ -1644,6 +1789,7 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
   const skipSuggested=()=>{finalizeSave(pendingSave);setPendingSave(null);setSuggestData(null);};
   const addManualLinks=sel2=>{
     if(!sel)return;
+    if(sel.lockedBy&&!isAdmin){setManualLinkOpen(false);return;}
     const u={...sel,
       linkedElements:[...new Set([...(sel.linkedElements||[]),...sel2.elements])],
       linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...sel2.db])],
@@ -1652,17 +1798,25 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     };
     setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setManualLinkOpen(false);
   };
-  const deleteReport=()=>{setReports(p=>p.filter(r=>r.id!==sel.id));setSel(null);setShowDetail(false);setMode("view");};
-  const confirmLinks=(selS,selD)=>{const u={...sel,linkedSpectra:[...new Set([...(sel.linkedSpectra||[]),...selS])],linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...selD])]};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setShowLink(false);};
+  const deleteReport=()=>{if(sel?.lockedBy&&!isAdmin)return;setReports(p=>p.filter(r=>r.id!==sel.id));setSel(null);setShowDetail(false);setMode("view");};
+  const confirmLinks=(selS,selD)=>{if(sel?.lockedBy&&!isAdmin){setShowLink(false);return;}const u={...sel,linkedSpectra:[...new Set([...(sel.linkedSpectra||[]),...selS])],linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...selD])]};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setShowLink(false);};
   const aiReview=async()=>{if(!sel)return;setAiLoading(true);const content=`Title:${sel.title}\nMethod:${sel.method}\nResults:${sel.results}\nDiscussion:${sel.discussion}\nConclusion:${sel.conclusion}`;try{const t=await callClaude("You are a chemistry tutor reviewing a first-year lab report. Give a concise review (4-5 sentences): what is done well, any scientific errors, one suggestion, one follow-up question.",[{role:"user",content}]);const u={...sel,aiSummary:t};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);}catch{}setAiLoading(false);};
   const linkedDb=dbEntries.filter(e=>sel?.linkedDbIds?.includes(e.id));
   const linkedSp=spectraResults.filter(s=>sel?.linkedSpectra?.includes(s.id));
 
+  const repLocked=!!sel?.lockedBy;
+  const repCanEdit=!repLocked||isAdmin;
   const viewContent=sel&&mode==="view"&&(
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-        <div><div style={{fontFamily:serif,fontSize:19,color:C.text,fontWeight:700,marginBottom:4}}>{sel.title}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}</div>{sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.teal} small/>)}</div>}</div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><Btn onClick={()=>setShowLink(true)} accent={C.teal} small>⇢ Links</Btn><Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn><Btn onClick={startEdit} accent={C.blue} small>Edit</Btn><Btn onClick={deleteReport} accent="#f87171" small outlined>Delete</Btn></div>
+        <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:serif,fontSize:19,color:C.text,fontWeight:700}}>{sel.title}</span><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div>{sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.teal} small/>)}</div>}</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {repCanEdit&&<Btn onClick={()=>setShowLink(true)} accent={C.teal} small>⇢ Links</Btn>}
+          {repCanEdit&&<Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn>}
+          {repCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
+          {repCanEdit&&<Btn onClick={deleteReport} accent="#f87171" small outlined>Delete</Btn>}
+          {isAdmin&&<LockToggleBtn locked={repLocked} onToggle={toggleLock}/>}
+        </div>
       </div>
       {(linkedDb.length>0||linkedSp.length>0)&&<Card style={{padding:12}}><SLabel accent={C.teal}>Linked Entries</SLabel><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{linkedDb.map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:6,background:C.green+"12",border:`1px solid ${C.green}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.green,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{e.name}</span></div>)}{linkedSp.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",gap:6,background:C.blue+"12",border:`1px solid ${C.blue}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.blue,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{s.name}</span></div>)}</div></Card>}
       <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.method,sel.results,sel.discussion,sel.conclusion,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
@@ -1702,7 +1856,7 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
             onMouseEnter={e2=>e2.currentTarget.style.background="#0e1220"} onMouseLeave={e2=>e2.currentTarget.style.background=C.panel}>
             <div style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600,marginBottom:4}}>{r.title||"Untitled"}</div>
             <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginBottom:6}}>{r.date}</div>
-            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{r.tags?.map(t=><Pill key={t} label={t} color={C.teal} small/>)}{hL&&<Pill label={`${(r.linkedSpectra?.length||0)+(r.linkedDbIds?.length||0)} links`} color={C.blue} small/>}</div>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{r.tags?.map(t=><Pill key={t} label={t} color={C.teal} small/>)}{hL&&<Pill label={`${(r.linkedSpectra?.length||0)+(r.linkedDbIds?.length||0)} links`} color={C.blue} small/>}<LockBadge lockedBy={r.lockedBy} small/></div>
           </div>
         );})}
       </div>
@@ -1723,6 +1877,8 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
 // ROOT APP
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
+  const [username,setUsername]=useUsername();
+  const isAdmin = !!username && username.trim().toLowerCase()===ADMIN_NAME.toLowerCase();
   const [tab,setTab]=useState("table");
   const [sidebarOpen,setSidebarOpen]=useState(false);
   const addToDbRef=useRef(null);
@@ -1738,6 +1894,11 @@ export default function App() {
   const handleNavigate=useCallback((targetTab,entry)=>{ setTab(targetTab); setNavTarget(entry?{tab:targetTab,id:entry.id}:null); },[]);
 
   const currentLabel = NAV.find(n=>n.id===tab);
+  const switchUser=()=>{ if(window.confirm("Switch to a different name on this browser?")) setUsername(""); };
+
+  // All hooks above must run every render regardless of login state, so the
+  // gate check itself happens down here, right before the real UI renders.
+  if(!username) return <NameGate onSubmit={setUsername}/>;
 
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:C.bg,color:C.text,overflow:"hidden",position:"relative"}}>
@@ -1750,12 +1911,12 @@ export default function App() {
         ):null}
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontFamily:serif,fontSize:18,fontWeight:700,color:C.text}}>Pria<span style={{color:C.orange}}>bora</span></span>
-          {isMobile&&<><span style={{color:C.faint,margin:"0 4px"}}>·</span><span style={{fontFamily:mono,fontSize:11,color:C.teal}}>{currentLabel?.icon} {currentLabel?.label==="DB"?"Reference DB":currentLabel?.label==="Spectra"?"Spectrum Analyser":currentLabel?.label==="Table"?"Periodic Table":currentLabel?.label}</span></>}
+          {isMobile&&<><span style={{color:C.faint,margin:"0 4px"}}>·</span><span style={{fontFamily:mono,fontSize:11,color:C.orange}}>{currentLabel?.icon}</span><TwoToneTitle text={moduleTitle(currentLabel?.label)} style={{fontFamily:mono,fontSize:11,marginLeft:4}}/></>}
         </div>
         {!isMobile&&(
           <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:16}}>
-            <span style={{fontFamily:mono,fontSize:12,color:C.teal}}>{currentLabel?.icon}</span>
-            <span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{currentLabel?.label==="DB"?"Reference DB":currentLabel?.label==="Spectra"?"Spectrum Analyser":currentLabel?.label==="Table"?"Periodic Table":currentLabel?.label}</span>
+            <span style={{fontFamily:mono,fontSize:12,color:C.orange}}>{currentLabel?.icon}</span>
+            <TwoToneTitle text={moduleTitle(currentLabel?.label)} style={{fontFamily:serif,fontSize:14,fontWeight:600}}/>
           </div>
         )}
         <div style={{marginLeft:"auto"}}>
@@ -1766,18 +1927,18 @@ export default function App() {
       {/* Body */}
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
         {/* Desktop sidebar */}
-        {!isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={false} onClose={()=>{}} isMobile={false}/>}
+        {!isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={false} onClose={()=>{}} isMobile={false} username={username} isAdmin={isAdmin} onSwitchUser={switchUser}/>}
 
         {/* Mobile drawer */}
-        {isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={sidebarOpen} onClose={()=>setSidebarOpen(false)} isMobile={true}/>}
+        {isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={sidebarOpen} onClose={()=>setSidebarOpen(false)} isMobile={true} username={username} isAdmin={isAdmin} onSwitchUser={switchUser}/>}
 
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:isMobile?"14px 14px 80px":"20px 24px",position:"relative"}}>
           {tab==="table"   &&<PeriodicTableModule dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate} openElementN={navTarget?.tab==="table"?navTarget.id:null} onOpened={()=>setNavTarget(null)}/>}
-          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes}/>}
+          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes} username={username} isAdmin={isAdmin}/>}
           {tab==="spectrum"&&<SpectrumModule saveToDbRef={addToDbRef} spectraResultsRef={spectraResultsRef} dbEntries={dbEntries} reports={reports} setReports={setReports}/>}
-          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes}/>}
-          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports}/>}
+          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes} username={username} isAdmin={isAdmin}/>}
+          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports} username={username} isAdmin={isAdmin}/>}
         </div>
       </div>
 
