@@ -494,6 +494,82 @@ function useLS(key, init) {
   return [val, set];
 }
 
+// ── Text annotations ("select a word/sentence, add a note") ──────────────────
+// Shared across the group (same trust model as the rest of the app — no
+// per-user privacy layer). Loaded once into memory; every module that renders
+// annotatable text reads/writes this same list via entry_type + entry_id + field.
+function useAnnotations() {
+  const [items, setItemsState] = useState(() => {
+    try { const s = localStorage.getItem("priabora-annotations"); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.from("priabora_annotations").select("*").order("created_at", { ascending: true });
+        if (cancelled) return;
+        if (error) throw error;
+        setItemsState(data || []);
+        try { localStorage.setItem("priabora-annotations", JSON.stringify(data || [])); } catch {}
+      } catch (e) { console.error("Annotations load failed", e); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => { try { localStorage.setItem("priabora-annotations", JSON.stringify(items)); } catch {} }, [items]);
+
+  const add = useCallback(async (a) => {
+    const tempId = "tmp-" + Date.now() + Math.random();
+    const temp = { ...a, id: tempId, created_at: new Date().toISOString() };
+    setItemsState(p => [...p, temp]);
+    try {
+      const { data, error } = await supabase.from("priabora_annotations")
+        .insert({ entry_type: a.entry_type, entry_id: a.entry_id, field: a.field, match_text: a.match_text, note: a.note, username: a.username })
+        .select().single();
+      if (error) throw error;
+      setItemsState(p => p.map(x => x.id === tempId ? data : x));
+    } catch (e) { console.error("Annotation save failed", e); }
+  }, []);
+
+  const remove = useCallback(async (id) => {
+    setItemsState(p => p.filter(x => x.id !== id));
+    try { const { error } = await supabase.from("priabora_annotations").delete().eq("id", id); if (error) throw error; }
+    catch (e) { console.error("Annotation delete failed", e); }
+  }, []);
+
+  return [items, add, remove];
+}
+// Splits `text` into plain/annotated segments given the annotations relevant to
+// one field. Longest match_text wins on overlap; repeats of the same phrase are
+// matched to separate occurrences where possible.
+function buildAnnotatedSegments(text, anns) {
+  if (!text || !anns || anns.length === 0) return [{ text, ann: null }];
+  const sorted = [...anns].sort((a, b) => (b.match_text || "").length - (a.match_text || "").length);
+  const consumed = [];
+  const overlaps = (s, e) => consumed.some(([cs, ce]) => s < ce && e > cs);
+  const ranges = [];
+  for (const ann of sorted) {
+    if (!ann.match_text) continue;
+    let idx = 0;
+    while (true) {
+      const found = text.indexOf(ann.match_text, idx);
+      if (found === -1) break;
+      const end = found + ann.match_text.length;
+      if (!overlaps(found, end)) { ranges.push({ start: found, end, ann }); consumed.push([found, end]); }
+      idx = found + 1;
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start);
+  const segments = [];
+  let cursor = 0;
+  for (const r of ranges) {
+    if (r.start > cursor) segments.push({ text: text.slice(cursor, r.start), ann: null });
+    segments.push({ text: text.slice(r.start, r.end), ann: r.ann });
+    cursor = r.end;
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), ann: null });
+  return segments;
+}
+
 // ── Backup: export / import all Priabora data as a single JSON file ──────────
 async function exportAllData() {
   const out = {};
@@ -546,6 +622,43 @@ async function callClaude(system, messages, max_tokens=1000) {
   return d.content?.map(b=>b.text||"").join("")||"";
 }
 function parseJSON(t) { return JSON.parse(t.replace(/```json|```/g,"").trim()); }
+
+// ── Admin activity log ────────────────────────────────────────────────────────
+// Every add/edit/delete/lock/unlock across DB, Reports, Notebook and the
+// Periodic Table gets written here (table: priabora_activity_log — see setup
+// note). Fire-and-forget: never blocks the UI, never throws into a caller.
+async function logActivity(module, action, label, username) {
+  try {
+    const { error } = await supabase.from("priabora_activity_log").insert({
+      username: username || "", module, action, entry_label: label || "",
+    });
+    if (error) console.error("Activity log failed", error);
+  } catch (e) { console.error("Activity log failed", e); }
+}
+// Fetches activity rows newer than `sinceISO` (or everything, capped, if null —
+// i.e. the very first time the admin loads the app after this feature exists).
+async function fetchNewActivity(sinceISO) {
+  try {
+    let q = supabase.from("priabora_activity_log").select("*").order("created_at", { ascending: false }).limit(200);
+    if (sinceISO) q = q.gt("created_at", sinceISO);
+    const { data, error } = await q;
+    if (error) throw error;
+    return data || [];
+  } catch (e) { console.error("Activity fetch failed", e); return []; }
+}
+async function getAdminLastSeen() {
+  try {
+    const { data, error } = await supabase.from("priabora_data").select("value").eq("key", "priabora-admin-lastseen").maybeSingle();
+    if (error) throw error;
+    return data?.value?.ts || null;
+  } catch (e) { console.error("Admin last-seen fetch failed", e); return null; }
+}
+async function setAdminLastSeen(ts) {
+  try {
+    const { error } = await supabase.from("priabora_data").upsert({ key: "priabora-admin-lastseen", value: { ts }, updated_at: new Date().toISOString() });
+    if (error) throw error;
+  } catch (e) { console.error("Admin last-seen save failed", e); }
+}
 const toBase64 = f => new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(f);});
 const toText   = f => new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsText(f);});
 function resizeImageFile(file,maxDim=1000,quality=0.75){
@@ -641,9 +754,10 @@ function CompoundPropsGrid({properties,onSave,readOnly}){
   );
 }
 // Small red pill shown on a locked entry — visible to everyone, not just admins.
+// Deliberately doesn't name who locked it (keeps the admin's identity private).
 function LockBadge({lockedBy,small}){
   if(!lockedBy) return null;
-  return <Pill label={`🔒 Locked by ${lockedBy}`} color={C.red} small={small}/>;
+  return <Pill label="🔒 Locked" color={C.red} small={small}/>;
 }
 // Admin-only lock/unlock toggle, shown in an entry's detail view.
 function LockToggleBtn({locked,onToggle}){
@@ -1010,6 +1124,120 @@ function LinkedEntriesDisplay({entry,dbEntries,reports,notes,onNavigate}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN CHANGE LOG MODAL — shown once per admin session when new activity
+// (adds/edits/deletes/locks) exists since their last visit.
+// ═══════════════════════════════════════════════════════════════════════════════
+const ACTIVITY_ACTION_COLOR = { added:C.green, edited:C.blue, deleted:C.red, locked:C.orange, unlocked:C.teal };
+const ACTIVITY_MODULE_LABEL = { db:"Reference DB", reports:"Lab Reports", notebook:"Notebook", table:"Periodic Table" };
+function AdminChangeLogModal({activities,onClose}) {
+  const isMobile=useIsMobile();
+  const inner=(
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <p style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.7}}>Changes made across Priabora since your last visit.</p>
+      {activities.length===0
+        ? <div style={{textAlign:"center",padding:"20px 10px",color:C.faint,fontFamily:mono,fontSize:11}}>No new changes.</div>
+        : activities.map(a=>{
+          const col=ACTIVITY_ACTION_COLOR[a.action]||C.blue;
+          return (
+            <div key={a.id} style={{background:C.surface,border:`1px solid ${C.border}`,borderLeft:`3px solid ${col}`,borderRadius:6,padding:"10px 12px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <span style={{fontFamily:serif,fontSize:13,color:C.text,fontWeight:600}}>{a.entry_label||"(untitled)"}</span>
+                <Pill label={a.action} color={col} small/>
+              </div>
+              <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:3}}>{ACTIVITY_MODULE_LABEL[a.module]||a.module} · {a.username||"someone"} · {new Date(a.created_at).toLocaleString()}</div>
+            </div>
+          );
+        })}
+      <div style={{display:"flex",justifyContent:"flex-end"}}><Btn onClick={onClose} accent={C.orange} small>Close</Btn></div>
+    </div>
+  );
+  if (isMobile) return <Sheet open onClose={onClose} title="Admin — Recent Changes">{inner}</Sheet>;
+  return (
+    <div style={{position:"fixed",inset:0,background:"#000000bb",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:C.panel,border:`1px solid ${C.borderHi}`,borderRadius:12,width:"100%",maxWidth:480,maxHeight:"78vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontFamily:serif,fontSize:15,color:C.text,fontWeight:700}}>Admin — Recent Changes</span>
+          <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,fontSize:18}}>✕</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"16px 20px",flex:1}}>{inner}</div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ANNOTATABLE TEXT — select any word/sentence to attach a note; click a
+// highlighted phrase to read it back. Used for long-form fields (summaries,
+// history, method/results/discussion, notebook entries).
+// ═══════════════════════════════════════════════════════════════════════════════
+function AnnotatableText({text,anns,entryType,entryId,field,username,onAdd,onRemove,accent,style,tag:Tag="p",placeholder}) {
+  const ref=useRef();
+  const [pending,setPending]=useState(null);
+  const [draft,setDraft]=useState("");
+  const [saving,setSaving]=useState(false);
+  const [openAnn,setOpenAnn]=useState(null);
+
+  const capture=()=>{
+    setTimeout(()=>{
+      const sel=window.getSelection&&window.getSelection();
+      if(!sel||sel.isCollapsed)return;
+      const anchor=sel.anchorNode,focus=sel.focusNode;
+      if(!ref.current||!anchor||!focus)return;
+      if(!ref.current.contains(anchor)||!ref.current.contains(focus))return;
+      const str=sel.toString().trim();
+      if(!str||str.length<2||str.length>300)return;
+      setPending(str);setDraft("");
+    },10);
+  };
+
+  const relevant=(anns||[]).filter(a=>a.entry_type===entryType&&String(a.entry_id)===String(entryId)&&a.field===field);
+  const segments=buildAnnotatedSegments(text||"",relevant);
+
+  const saveNote=async()=>{
+    if(!draft.trim())return;
+    setSaving(true);
+    await onAdd({entry_type:entryType,entry_id:String(entryId),field,match_text:pending,note:draft.trim(),username});
+    setSaving(false);setPending(null);setDraft("");
+  };
+
+  if(!text) return <Tag style={style}><span style={{color:C.faint,fontStyle:"italic"}}>{placeholder||"—"}</span></Tag>;
+
+  return (
+    <div>
+      <Tag ref={ref} onMouseUp={capture} onTouchEnd={capture} style={{...style,cursor:"text"}}>
+        {segments.map((seg,i)=>seg.ann
+          ? <mark key={i} onClick={()=>setOpenAnn(seg.ann)} title="Click to read the note" style={{background:accent+"2a",color:"inherit",borderBottom:`2px solid ${accent}99`,cursor:"pointer",padding:"0 1px",borderRadius:2}}>{seg.text}</mark>
+          : <span key={i}>{seg.text}</span>
+        )}
+      </Tag>
+      {pending&&(
+        <div className="fade-in" style={{marginTop:8,background:C.surface,border:`1px solid ${accent}40`,borderRadius:7,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{fontFamily:mono,fontSize:10,color:C.muted}}>Note on: <span style={{color:accent,fontStyle:"italic"}}>"{pending}"</span></div>
+          <Textarea value={draft} onChange={e=>setDraft(e.target.value)} placeholder="Add your note…" rows={2}/>
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={saveNote} accent={accent} small disabled={!draft.trim()||saving}>{saving?"Saving…":"Save note"}</Btn>
+            <Btn onClick={()=>{setPending(null);setDraft("");}} accent={C.muted} small outlined>Cancel</Btn>
+          </div>
+        </div>
+      )}
+      {openAnn&&(
+        <div onClick={()=>setOpenAnn(null)} style={{position:"fixed",inset:0,zIndex:350,background:"#000000aa",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div onClick={e=>e.stopPropagation()} className="fade-up" style={{background:C.panel,border:`1px solid ${accent}55`,borderRadius:10,padding:16,maxWidth:380,width:"100%"}}>
+            <div style={{fontFamily:mono,fontSize:10,color:accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>Note on "{openAnn.match_text}"</div>
+            <p style={{fontFamily:mono,fontSize:13,color:C.text,lineHeight:1.7,whiteSpace:"pre-wrap"}}>{openAnn.note}</p>
+            <div style={{fontFamily:mono,fontSize:9,color:C.faint,marginTop:10}}>{openAnn.username?`— ${openAnn.username}`:""}{openAnn.created_at?` · ${new Date(openAnn.created_at).toLocaleDateString()}`:""}</div>
+            <div style={{display:"flex",gap:8,marginTop:12,justifyContent:"flex-end"}}>
+              <Btn onClick={()=>{onRemove(openAnn.id);setOpenAnn(null);}} accent={C.red} small outlined>Delete note</Btn>
+              <Btn onClick={()=>setOpenAnn(null)} accent={accent} small>Close</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PERIODIC TABLE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 function ElementTile({el,selected,dimmed,onClick,size=42}){
@@ -1022,7 +1250,7 @@ function ElementTile({el,selected,dimmed,onClick,size=42}){
   </div>;
 }
 
-function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
+function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) {
   const col=ELEM_CAT[el.cat]||C.blue;
   const [tab,setTab]=useState("info");
   const [userNote,setUserNote]=useLS(`elem-note-${el.n}`,"");
@@ -1034,7 +1262,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
   const [linkSearch,setLinkSearch]=useState("");
   // All element data is manually entered (e.g. from PubChem) — no AI auto-fill for the Periodic Table.
   const getField=k=>override[k];
-  const saveField=(k,v)=>setOverride(p=>({...p,[k]:v}));
+  const saveField=(k,v)=>{setOverride(p=>({...p,[k]:v}));logActivity("table","edited",`${el.name} — ${k}`,username);};
   const joinArr=a=>(a||[]).join(", ");
   const splitArr=v=>v.split(",").map(s=>s.trim()).filter(Boolean);
   const escapeRe=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
@@ -1178,7 +1406,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
         {tab==="notes"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:10}}>
           <p style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.6}}>Personal notes for {el.name} — saved automatically.</p>
           {!editNote?(<>{userNote?<div style={{background:C.surface,border:`1px solid ${C.border}`,borderLeft:`3px solid ${col}`,borderRadius:7,padding:12,fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.8,whiteSpace:"pre-wrap"}}>{userNote}</div>:<div style={{fontFamily:mono,fontSize:11,color:C.faint,fontStyle:"italic",padding:"8px 0"}}>No notes yet.</div>}<Btn onClick={()=>{setNoteDraft(userNote);setEditNote(true);}} accent={col} small full>{userNote?"Edit notes":"+ Add notes"}</Btn></>):(
-            <><Textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder={`Notes about ${el.name}…`} rows={7}/><div style={{display:"flex",gap:8}}><Btn onClick={()=>{setUserNote(noteDraft);setEditNote(false);}} accent={col} small>Save</Btn><Btn onClick={()=>setEditNote(false)} accent={C.muted} small>Cancel</Btn></div></>
+            <><Textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder={`Notes about ${el.name}…`} rows={7}/><div style={{display:"flex",gap:8}}><Btn onClick={()=>{setUserNote(noteDraft);setEditNote(false);logActivity("table","edited",`${el.name} — notes`,username);}} accent={col} small>Save</Btn><Btn onClick={()=>setEditNote(false)} accent={C.muted} small>Cancel</Btn></div></>
           )}
         </div>}
       </div>
@@ -1186,7 +1414,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose}) {
   );
 }
 
-function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,onOpened}) {
+function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,onOpened,username}) {
   const [selected,setSelected]=useState(null);
   const [filterCat,setFilterCat]=useState(null);
   const [search,setSearch]=useState("");
@@ -1206,7 +1434,7 @@ function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,on
   const matchSearch=el=>{const q=search.toLowerCase();return !q||el.name.toLowerCase().includes(q)||el.sym.toLowerCase().includes(q)||String(el.n).includes(q);};
   const dim=el=>(filterCat?el.cat!==filterCat:false)||!matchSearch(el);
   const renderTile=(period,group)=>{const el=EGRID[period]?.[group];if(!el)return <div key={`${period}-${group}`} style={{width:TILE,height:TILE,flexShrink:0}}/>;return <ElementTile key={el.n} el={el} selected={selected?.n===el.n} dimmed={dim(el)} onClick={handleSelect} size={TILE}/>;};
-  const panelContent = selected ? <ElementPanel key={selected.n} el={selected} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate} onClose={isMobile?()=>setShowPanel(false):null}/> : null;
+  const panelContent = selected ? <ElementPanel key={selected.n} el={selected} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate} onClose={isMobile?()=>setShowPanel(false):null} username={username}/> : null;
 
   return (
     <div style={{display:"flex",height:"100%",gap:16,minHeight:0,overflow:"hidden"}}>
@@ -1263,7 +1491,7 @@ function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,on
       {/* Mobile: sheet */}
       {isMobile&&showPanel&&selected&&(
         <Sheet open={showPanel} onClose={()=>setShowPanel(false)} title={`${selected.sym} — ${selected.name}`}>
-          <ElementPanel key={selected.n} el={selected} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
+          <ElementPanel key={selected.n} el={selected} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate} username={username}/>
         </Sheet>
       )}
     </div>
@@ -1353,7 +1581,7 @@ function PhotoPicker({photos,onChange,entryId}){
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATABASE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,username,isAdmin}) {
+function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
   const [entries,setEntries]=useCloudCollection("db",SEED_DB);
   const [pendingSave,setPendingSave]=useState(null);
   const [suggestData,setSuggestData]=useState(null);
@@ -1366,12 +1594,13 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   const [draft,setDraft]=useState(null);
   const [addingCat,setAddingCat]=useState(false);const [newCatDraft,setNewCatDraft]=useState("");
   const isMobile=useIsMobile();
-  const addEntry=useCallback(e=>setEntries(p=>[e,...p]),[setEntries]);
+  const addEntry=useCallback(e=>{setEntries(p=>[e,...p]);logActivity("db","added",e.name,username);},[setEntries,username]);
   useEffect(()=>{if(addEntryRef)addEntryRef.current=addEntry;},[addEntry,addEntryRef]);
   const del=id=>{
     const e=entries.find(x=>x.id===id);
     if(e?.lockedBy&&!isAdmin)return; // locked entries can't be deleted by non-admins
     setEntries(p=>p.filter(x=>x.id!==id));setSelected(null);setShowDetail(false);setMode("view");
+    if(e) logActivity("db","deleted",e.name,username);
   };
   const openEntry=e=>{setSelected(e);setMode("view");setShowDetail(true);};
   useEffect(()=>{
@@ -1380,7 +1609,12 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
     if(e)openEntry(e);
     onOpened&&onOpened();
   },[openId]);
-  const toggleLock=()=>{if(!isAdmin||!selected)return;updateEntry(selected.id,{lockedBy:selected.lockedBy?null:username},true);};
+  const toggleLock=()=>{
+    if(!isAdmin||!selected)return;
+    const willLock=!selected.lockedBy;
+    updateEntry(selected.id,{lockedBy:willLock?username:null},true);
+    logActivity("db",willLock?"locked":"unlocked",selected.name,username);
+  };
   const updateEntry=(id,patch,fromAdminLockAction)=>{
     const e=entries.find(x=>x.id===id);
     if(e?.lockedBy&&!isAdmin&&!fromAdminLockAction)return; // locked entries can't be edited by non-admins
@@ -1398,8 +1632,8 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
   const addNewSubcategoryToDraft=label=>{if(!subcategories.some(s=>s.id===label)){setSubcategories(p=>[...p,{id:label,label}]);}setDraft(d=>d.subcategories.includes(label)?d:{...d,subcategories:[...d.subcategories,label]});};
   const finalizeSave=saved=>{
-    if(mode==="new"){setEntries(p=>[saved,...p]);setSelected(saved);}
-    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));setSelected(saved);}
+    if(mode==="new"){setEntries(p=>[saved,...p]);setSelected(saved);logActivity("db","added",saved.name,username);}
+    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));setSelected(saved);logActivity("db","edited",saved.name,username);}
     setMode("view");
   };
   const saveEntry=()=>{
@@ -1447,12 +1681,19 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<LockBadge lockedBy={selected.lockedBy}/></div>
       <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} readOnly={!dbCanEdit} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
-      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}`,paddingLeft:12}}><EditableText tag="p" value={selected.summary} onSave={v=>updateEntry(selected.id,{summary:v})} readOnly={!dbCanEdit} multiline placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/></div>
+      <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
+      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}`,paddingLeft:12}}>
+        <AnnotatableText text={selected.summary} anns={annotations} entryType="db" entryId={selected.id} field="summary" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.green} placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/>
+      </div>
       {getEntryCats(selected).includes("Compound")&&<CompoundPropsGrid properties={selected.properties} readOnly={!dbCanEdit} onSave={(k,v)=>updateEntry(selected.id,{properties:{...(selected.properties||{}),[k]:v}})}/>}
       {getEntrySubs(selected).length>0&&<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{getEntrySubs(selected).map(sid=><Pill key={sid} label={subcategories.find(s=>s.id===sid)?.label||sid} color={C.purple} small/>)}</div>}
       <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{selected.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
-      <div><SLabel accent={C.yellow}>History</SLabel><EditableText tag="p" value={selected.history||""} onSave={v=>updateEntry(selected.id,{history:v})} readOnly={!dbCanEdit} multiline placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/></div>
-      <div><SLabel accent={C.pink}>General Info</SLabel><EditableText tag="p" value={selected.generalInfo||""} onSave={v=>updateEntry(selected.id,{generalInfo:v})} readOnly={!dbCanEdit} multiline placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/></div>
+      <div><SLabel accent={C.yellow}>History</SLabel>
+        <AnnotatableText text={selected.history||""} anns={annotations} entryType="db" entryId={selected.id} field="history" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.yellow} placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/>
+      </div>
+      <div><SLabel accent={C.pink}>General Info</SLabel>
+        <AnnotatableText text={selected.generalInfo||""} anns={annotations} entryType="db" entryId={selected.id} field="generalInfo" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.pink} placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/>
+      </div>
       <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,selected.history,selected.generalInfo,(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
@@ -1605,11 +1846,17 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTEBOOK MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin}) {
+function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
   const [draft,setDraft]=useState({title:"",content:"",tags:""});const [aiLoading,setAiLoading]=useState(false);
-  const toggleLock=()=>{if(!isAdmin||!sel)return;const u={...sel,lockedBy:sel.lockedBy?null:username};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);};
+  const toggleLock=()=>{
+    if(!isAdmin||!sel)return;
+    const willLock=!sel.lockedBy;
+    const u={...sel,lockedBy:willLock?username:null};
+    setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);
+    logActivity("notebook",willLock?"locked":"unlocked",sel.title,username);
+  };
   const [showDetail,setShowDetail]=useState(false);
   const [pendingSave,setPendingSave]=useState(null);
   const [pendingKind,setPendingKind]=useState(null);
@@ -1625,8 +1872,8 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
   },[openId]);
   const startNew=()=>{setDraft({title:"",content:"",tags:""});setCreating(true);setSel(null);setShowDetail(true);};
   const finalizeSave=(n,kind)=>{
-    if(kind==="new"){setNotes(p=>[n,...p]);setSel(n);setCreating(false);}
-    else{setNotes(p=>p.map(x=>x.id===n.id?n:x));setSel(n);setEditing(false);}
+    if(kind==="new"){setNotes(p=>[n,...p]);setSel(n);setCreating(false);logActivity("notebook","added",n.title,username);}
+    else{setNotes(p=>p.map(x=>x.id===n.id?n:x));setSel(n);setEditing(false);logActivity("notebook","edited",n.title,username);}
   };
   const stageSave=(n,kind)=>{
     const text=[n.title,n.content,(n.tags||[]).join(" ")];
@@ -1670,6 +1917,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     const n=notes.find(x=>x.id===id);
     if(n?.lockedBy&&!isAdmin)return;
     setNotes(p=>p.filter(x=>x.id!==id));setSel(null);setShowDetail(false);
+    if(n) logActivity("notebook","deleted",n.title,username);
   };
   const aiSummarise=async()=>{if(!sel)return;setAiLoading(true);try{const t=await callClaude("You are a chemistry tutor. Summarise this lab note (3-4 sentences), highlight key chemistry, and suggest one follow-up question.",[{role:"user",content:`Title: ${sel.title}\n\n${sel.content}`}]);const u={...sel,aiSummary:t};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);}catch{}setAiLoading(false);};
 
@@ -1692,7 +1940,8 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
           </div>
         </div>
         {sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.purple} small/>)}</div>}
-        <div style={{fontFamily:mono,fontSize:15,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap",borderLeft:`3px solid ${C.border}`,paddingLeft:12}}>{sel.content}</div>
+        <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
+        <AnnotatableText tag="div" text={sel.content} anns={annotations} entryType="notebook" entryId={sel.id} field="content" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.purple} style={{fontFamily:mono,fontSize:15,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap",borderLeft:`3px solid ${C.border}`,paddingLeft:12}}/>
         <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.content,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
         <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
         {sel.aiSummary?<Card style={{padding:14,border:`1px solid ${C.purple}33`,borderLeft:`3px solid ${C.purple}`}}><SLabel accent={C.purple}>AI Summary</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}>{sel.aiSummary}</p></Card>:<Btn onClick={aiSummarise} disabled={aiLoading} accent={C.purple} small full>{aiLoading?"Summarising…":"✦ Get AI tutor summary"}</Btn>}
@@ -1741,7 +1990,7 @@ function DataTableEditor({table,onChange}){
   const setCell=(i,j,v)=>onChange(table.map((r,ri)=>r.map((c,ci)=>ri===i&&ci===j?v:c)));
   return<div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{border:`1px solid ${C.border}`,padding:0}}><input value={cell} onChange={e=>setCell(i,j,e.target.value)} onKeyDown={e=>handleScriptKeyDown(e,cell,ev=>setCell(i,j,ev.target.value))} style={{background:i===0?C.surface+"cc":C.surface,border:"none",padding:"8px 9px",color:i===0?C.text:C.muted,fontFamily:mono,fontSize:11,fontWeight:i===0?600:400,width:"100%",minWidth:80}}/></td>)}<td style={{padding:"0 4px"}}><button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.faint,fontSize:12}}>✕</button></td></tr>)}</tbody></table><div style={{display:"flex",gap:6,marginTop:8}}><Btn onClick={addRow} accent={C.muted} small outlined>+ Row</Btn><Btn onClick={addCol} accent={C.muted} small outlined>+ Col</Btn></div></div>;
 }
-function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes,username,isAdmin}){
+function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}){
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [sel,setSel]=useState(null);const [mode,setMode]=useState("view");const [draft,setDraft]=useState(null);
   const [showLink,setShowLink]=useState(false);const [aiLoading,setAiLoading]=useState(false);
@@ -1752,7 +2001,13 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
   const isMobile=useIsMobile();
   const spectraResults=spectraResultsRef?.current||[];
   const startNew=()=>{setDraft({...BLANK_REPORT(),tagsStr:"",createdBy:username||"",lockedBy:null});setSel(null);setMode("new");setShowDetail(true);};
-  const toggleLock=()=>{if(!isAdmin||!sel)return;const u={...sel,lockedBy:sel.lockedBy?null:username};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);};
+  const toggleLock=()=>{
+    if(!isAdmin||!sel)return;
+    const willLock=!sel.lockedBy;
+    const u={...sel,lockedBy:willLock?username:null};
+    setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);
+    logActivity("reports",willLock?"locked":"unlocked",sel.title,username);
+  };
   useEffect(()=>{
     if(openId==null)return;
     const r=reports.find(x=>x.id===openId);
@@ -1760,7 +2015,11 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     onOpened&&onOpened();
   },[openId]);
   const startEdit=()=>{setDraft({...sel,tagsStr:sel.tags.join(", ")});setMode("edit");};
-  const finalizeSave=saved=>{if(mode==="new"){setReports(p=>[saved,...p]);setSel(saved);}else{setReports(p=>p.map(r=>r.id===saved.id?saved:r));setSel(saved);}setMode("view");};
+  const finalizeSave=saved=>{
+    if(mode==="new"){setReports(p=>[saved,...p]);setSel(saved);logActivity("reports","added",saved.title,username);}
+    else{setReports(p=>p.map(r=>r.id===saved.id?saved:r));setSel(saved);logActivity("reports","edited",saved.title,username);}
+    setMode("view");
+  };
   const saveReport=()=>{
     if(!draft?.title?.trim())return;
     const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
@@ -1798,7 +2057,12 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     };
     setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setManualLinkOpen(false);
   };
-  const deleteReport=()=>{if(sel?.lockedBy&&!isAdmin)return;setReports(p=>p.filter(r=>r.id!==sel.id));setSel(null);setShowDetail(false);setMode("view");};
+  const deleteReport=()=>{
+    if(sel?.lockedBy&&!isAdmin)return;
+    setReports(p=>p.filter(r=>r.id!==sel.id));
+    logActivity("reports","deleted",sel.title,username);
+    setSel(null);setShowDetail(false);setMode("view");
+  };
   const confirmLinks=(selS,selD)=>{if(sel?.lockedBy&&!isAdmin){setShowLink(false);return;}const u={...sel,linkedSpectra:[...new Set([...(sel.linkedSpectra||[]),...selS])],linkedDbIds:[...new Set([...(sel.linkedDbIds||[]),...selD])]};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);setShowLink(false);};
   const aiReview=async()=>{if(!sel)return;setAiLoading(true);const content=`Title:${sel.title}\nMethod:${sel.method}\nResults:${sel.results}\nDiscussion:${sel.discussion}\nConclusion:${sel.conclusion}`;try{const t=await callClaude("You are a chemistry tutor reviewing a first-year lab report. Give a concise review (4-5 sentences): what is done well, any scientific errors, one suggestion, one follow-up question.",[{role:"user",content}]);const u={...sel,aiSummary:t};setReports(p=>p.map(r=>r.id===sel.id?u:r));setSel(u);}catch{}setAiLoading(false);};
   const linkedDb=dbEntries.filter(e=>sel?.linkedDbIds?.includes(e.id));
@@ -1818,14 +2082,15 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
           {isAdmin&&<LockToggleBtn locked={repLocked} onToggle={toggleLock}/>}
         </div>
       </div>
+      <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
       {(linkedDb.length>0||linkedSp.length>0)&&<Card style={{padding:12}}><SLabel accent={C.teal}>Linked Entries</SLabel><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{linkedDb.map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:6,background:C.green+"12",border:`1px solid ${C.green}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.green,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{e.name}</span></div>)}{linkedSp.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",gap:6,background:C.blue+"12",border:`1px solid ${C.blue}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.blue,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{s.name}</span></div>)}</div></Card>}
       <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.method,sel.results,sel.discussion,sel.conclusion,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
-      {sel.method&&<Card style={{padding:14}}><SLabel accent={C.purple}>Method</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.method}</p></Card>}
+      {sel.method&&<Card style={{padding:14}}><SLabel accent={C.purple}>Method</SLabel><AnnotatableText text={sel.method} anns={annotations} entryType="reports" entryId={sel.id} field="method" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.purple} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}/></Card>}
       {sel.dataTable?.length>0&&<Card style={{padding:14}}><SLabel accent={C.yellow}>Raw Data</SLabel><div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{sel.dataTable.map((row,i)=><tr key={i} style={{background:i===0?C.surface+"aa":"transparent"}}>{row.map((cell,j)=><td key={j} style={{padding:"8px 10px",color:i===0?C.text:C.muted,fontWeight:i===0?600:400,border:`1px solid ${C.border}30`}}>{cell}</td>)}</tr>)}</tbody></table></div></Card>}
-      {sel.results&&<Card style={{padding:14}}><SLabel accent={C.green}>Results</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.results}</p></Card>}
-      {sel.discussion&&<Card style={{padding:14}}><SLabel accent={C.orange}>Discussion</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.discussion}</p></Card>}
-      {sel.conclusion&&<Card style={{padding:14,borderLeft:`3px solid ${C.teal}`}}><SLabel accent={C.teal}>Conclusion</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{sel.conclusion}</p></Card>}
+      {sel.results&&<Card style={{padding:14}}><SLabel accent={C.green}>Results</SLabel><AnnotatableText text={sel.results} anns={annotations} entryType="reports" entryId={sel.id} field="results" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.green} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}/></Card>}
+      {sel.discussion&&<Card style={{padding:14}}><SLabel accent={C.orange}>Discussion</SLabel><AnnotatableText text={sel.discussion} anns={annotations} entryType="reports" entryId={sel.id} field="discussion" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.orange} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}/></Card>}
+      {sel.conclusion&&<Card style={{padding:14,borderLeft:`3px solid ${C.teal}`}}><SLabel accent={C.teal}>Conclusion</SLabel><AnnotatableText text={sel.conclusion} anns={annotations} entryType="reports" entryId={sel.id} field="conclusion" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.teal} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}/></Card>}
       {sel.aiSummary?<Card style={{padding:14,border:`1px solid ${C.purple}33`,borderLeft:`3px solid ${C.purple}`}}><SLabel accent={C.purple}>AI Review</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}>{sel.aiSummary}</p></Card>:<Btn onClick={aiReview} disabled={aiLoading} accent={C.purple} small full>{aiLoading?"Reviewing…":"✦ Get AI report review"}</Btn>}
     </div>
   );
@@ -1888,10 +2153,26 @@ export default function App() {
   const [dbEntries]=useCloudCollection("db",SEED_DB);
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [nbNotes]=useCloudCollection("notes",SEED_NOTES);
+  const [annotations,addAnnotation,removeAnnotation]=useAnnotations();
   const [navTarget,setNavTarget]=useState(null); // {tab, id} — set when navigating to a specific linked entry
   const counts={table:0,db:dbEntries.length,spectrum:0,reports:reports.length,notebook:nbNotes.length};
 
   const handleNavigate=useCallback((targetTab,entry)=>{ setTab(targetTab); setNavTarget(entry?{tab:targetTab,id:entry.id}:null); },[]);
+
+  // Admin change log: on load, if the current user is the admin, check for any
+  // add/edit/delete/lock activity since their last visit and pop it up.
+  const [changeLog,setChangeLog]=useState(null);
+  useEffect(()=>{
+    if(!isAdmin)return;
+    let cancelled=false;
+    (async()=>{
+      const lastSeen=await getAdminLastSeen();
+      const fresh=await fetchNewActivity(lastSeen);
+      if(!cancelled&&fresh.length>0)setChangeLog(fresh);
+    })();
+    return()=>{cancelled=true;};
+  },[isAdmin]);
+  const closeChangeLog=()=>{ setChangeLog(null); setAdminLastSeen(new Date().toISOString()); };
 
   const currentLabel = NAV.find(n=>n.id===tab);
   const switchUser=()=>{ if(window.confirm("Switch to a different name on this browser?")) setUsername(""); };
@@ -1903,6 +2184,7 @@ export default function App() {
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:C.bg,color:C.text,overflow:"hidden",position:"relative"}}>
       <GlobalStyles/>
+      {changeLog&&changeLog.length>0&&<AdminChangeLogModal activities={changeLog} onClose={closeChangeLog}/>}
 
       {/* Top bar */}
       <div style={{borderBottom:`1px solid ${C.border}`,padding:"0 16px",display:"flex",alignItems:"center",height:50,background:C.surface,flexShrink:0,zIndex:50}}>
@@ -1934,11 +2216,11 @@ export default function App() {
 
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:isMobile?"14px 14px 80px":"20px 24px",position:"relative"}}>
-          {tab==="table"   &&<PeriodicTableModule dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate} openElementN={navTarget?.tab==="table"?navTarget.id:null} onOpened={()=>setNavTarget(null)}/>}
-          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes} username={username} isAdmin={isAdmin}/>}
+          {tab==="table"   &&<PeriodicTableModule dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate} openElementN={navTarget?.tab==="table"?navTarget.id:null} onOpened={()=>setNavTarget(null)} username={username}/>}
+          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
           {tab==="spectrum"&&<SpectrumModule saveToDbRef={addToDbRef} spectraResultsRef={spectraResultsRef} dbEntries={dbEntries} reports={reports} setReports={setReports}/>}
-          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes} username={username} isAdmin={isAdmin}/>}
-          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports} username={username} isAdmin={isAdmin}/>}
+          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
+          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
         </div>
       </div>
 
