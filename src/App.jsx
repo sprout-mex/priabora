@@ -365,13 +365,15 @@ function useCloudCollection(collection, seed) {
     try { const s=localStorage.getItem(lsKey); return s?JSON.parse(s):seed; } catch { return seed; }
   });
   const prevRef = useRef(items);
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
+    dirtyRef.current = false;
     let cancelled = false;
     (async () => {
       try {
         const { data, error } = await supabase.from("priabora_items").select("item_id, value").eq("collection", collection);
-        if (cancelled) return;
+        if (cancelled || dirtyRef.current) return;
         if (error) throw error;
         if (data && data.length > 0) {
           const sorted = data.map(r => r.value).sort((a,b) => String(b.id).localeCompare(String(a.id), undefined, {numeric:true}));
@@ -417,6 +419,7 @@ function useCloudCollection(collection, seed) {
   }, [collection]);
 
   const setItems = useCallback(v => {
+    dirtyRef.current = true;
     setItemsState(prev => {
       const next = typeof v==="function"?v(prev):v;
       try { localStorage.setItem(lsKey, JSON.stringify(next)); } catch {}
@@ -762,6 +765,57 @@ function LockBadge({lockedBy,small}){
 // Admin-only lock/unlock toggle, shown in an entry's detail view.
 function LockToggleBtn({locked,onToggle}){
   return <Btn onClick={onToggle} accent={locked?C.green:C.red} small outlined>{locked?"🔓 Unlock entry":"🔒 Lock entry"}</Btn>;
+}
+
+// ── Completion status (DB entries & Notebook) ─────────────────────────────────
+// Three states, assigned when editing an entry, shown as a glanceable pill
+// (icon + label, not colour-only) on both the list row and the detail view.
+// Defaults to "in-progress" for any entry that predates this feature.
+const STATUS_META = {
+  "in-progress": { label:"In Progress", color:C.blue,   icon:"◐" },
+  "complete":    { label:"Complete",    color:C.green,  icon:"●" },
+  "on-hold":     { label:"On Hold",     color:C.orange, icon:"⏸" },
+};
+const STATUS_ORDER = ["in-progress","complete","on-hold"];
+// Two-digit hex alpha appended to a colour to vary the DB entry's category-colour
+// bar by completion level — no separate badge, just how "solid" the bar reads.
+const STATUS_OPACITY = { "on-hold":"40", "in-progress":"80", "complete":"ff" };
+// Whole-card background tint (category colour) by status — On Hold barely
+// tinted, Complete solidly tinted. Hover bumps one tier up from the base.
+const STATUS_BG_ALPHA    = { "on-hold":"0a", "in-progress":"12", "complete":"20" };
+const STATUS_HOVER_ALPHA = { "on-hold":"10", "in-progress":"18", "complete":"25" };
+// Which of the top/right/bottom sides also carry the accent as status
+// progresses — left is handled separately below and is always on.
+const STATUS_SIDES = {
+  "complete":    { top:true,  right:true,  bottom:true },
+  "in-progress": { top:true,  right:false, bottom:false },
+  "on-hold":     { top:false, right:true, bottom:true },
+};
+function statusBorderStyle(status,col){
+  const sides = STATUS_SIDES[status] || STATUS_SIDES["in-progress"];
+  const on = `3px solid ${col}`, off = `1px solid ${C.border}`;
+  return { borderLeft:on, borderTop:sides.top?on:off, borderRight:sides.right?on:off, borderBottom:sides.bottom?on:off };
+}
+function StatusPill({status,small}){
+  const m = STATUS_META[status] || STATUS_META["in-progress"];
+  return <Pill label={`${m.icon} ${m.label}`} color={m.color} small={small}/>;
+}
+// Row of tappable options for assigning status while editing — same shape as
+// the category/subcategory ChipPicker buttons, one always active.
+function StatusPicker({status,onChange}){
+  const current = status || "in-progress";
+  return (
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {STATUS_ORDER.map(s=>{
+        const m=STATUS_META[s]; const active=current===s;
+        return (
+          <button key={s} onClick={()=>onChange(s)} style={{display:"flex",alignItems:"center",gap:6,background:active?m.color+"25":C.surface,border:`1px solid ${active?m.color+"66":C.border}`,borderRadius:5,color:active?m.color:C.muted,padding:"7px 11px",fontFamily:mono,fontSize:11,fontWeight:500,transition:"all 0.12s"}}>
+            <span>{m.icon}</span>{m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 function SaveIndicator(){
   const status = useSaveStatus();
@@ -1624,9 +1678,9 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
 
   const addCategory=()=>{const label=newCatDraft.trim();if(!label){setAddingCat(false);return;}if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setAddingCat(false);setNewCatDraft("");};
 
-  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null});
+  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null,status:"in-progress"});
   const startNew=()=>{setDraft(BLANK_DB_ENTRY());setSelected(null);setMode("new");setShowDetail(true);};
-  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{}});setMode("edit");};
+  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{},status:selected.status||"in-progress"});setMode("edit");};
   const toggleCat=id=>setDraft(d=>({...d,categories:d.categories.includes(id)?d.categories.filter(x=>x!==id):[...d.categories,id]}));
   const toggleSub=id=>setDraft(d=>({...d,subcategories:d.subcategories.includes(id)?d.subcategories.filter(x=>x!==id):[...d.subcategories,id]}));
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
@@ -1682,7 +1736,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<LockBadge lockedBy={selected.lockedBy}/></div>
       <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} readOnly={!dbCanEdit} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
       <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
-      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}`,paddingLeft:12}}>
+      <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}${STATUS_OPACITY[selected.status||"in-progress"]}`,paddingLeft:12}}>
         <AnnotatableText text={selected.summary} anns={annotations} entryType="db" entryId={selected.id} field="summary" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.green} placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/>
       </div>
       {getEntryCats(selected).includes("Compound")&&<CompoundPropsGrid properties={selected.properties} readOnly={!dbCanEdit} onSave={(k,v)=>updateEntry(selected.id,{properties:{...(selected.properties||{}),[k]:v}})}/>}
@@ -1713,6 +1767,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
       <Input value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} placeholder="Entry name…" style={{fontFamily:serif,fontSize:14}}/>
       <Textarea value={draft.summary} onChange={e=>setDraft(d=>({...d,summary:e.target.value}))} placeholder="Summary…" rows={4}/>
       <Input value={draft.tagsStr} onChange={e=>setDraft(d=>({...d,tagsStr:e.target.value}))} placeholder="Tags (comma-separated)…"/>
+      <div><SLabel accent={C.blue}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
       <div><SLabel accent={C.blue}>Categories</SLabel><ChipPicker options={categories} selected={draft.categories} onToggle={toggleCat} onAddNew={addNewCategoryToDraft} color={C.blue}/></div>
       <div><SLabel accent={C.purple}>Subcategories</SLabel><ChipPicker options={subcategories} selected={draft.subcategories} onToggle={toggleSub} onAddNew={addNewSubcategoryToDraft} color={C.purple}/></div>
       {draft.categories.includes("Compound")&&<div><SLabel accent={C.blue}>Properties</SLabel><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>{COMPOUND_PROPERTY_FIELDS.map(([key,label])=>(
@@ -1748,9 +1803,9 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
         </div>
         {/* Entry list */}
         {filtered.length===0?<div style={{textAlign:"center",padding:"40px 20px",color:C.faint,fontFamily:mono,fontSize:12}}>No entries yet — tap + New entry to add one.</div>
-        :filtered.map(e=>{const cats=getEntryCats(e);const col=catColor(cats[0],categories);const isSel=selected?.id===e.id&&showDetail;return(
-          <div key={e.id} onClick={()=>openEntry(e)} style={{background:isSel?"#12172a":C.panel,border:`1px solid ${isSel?col+"55":C.border}`,borderLeft:`3px solid ${col}`,borderRadius:7,padding:"12px 14px",marginBottom:6,cursor:"pointer",transition:"all 0.12s"}}
-            onMouseEnter={e2=>{if(!isSel)e2.currentTarget.style.background="#0e1220";}} onMouseLeave={e2=>{if(!isSel)e2.currentTarget.style.background=C.panel;}}>
+        :filtered.map(e=>{const cats=getEntryCats(e);const col=catColor(cats[0],categories);const isSel=selected?.id===e.id&&showDetail;const stat=e.status||"in-progress";const bgA=STATUS_BG_ALPHA[stat],hovA=STATUS_HOVER_ALPHA[stat];return(
+          <div key={e.id} onClick={()=>openEntry(e)} style={{background:isSel?col+"2a":col+bgA,...statusBorderStyle(stat,col),boxShadow:isSel?`0 0 0 1px ${col}55`:"none",borderRadius:7,padding:"12px 14px",marginBottom:6,cursor:"pointer",transition:"all 0.12s"}}
+            onMouseEnter={e2=>{if(!isSel)e2.currentTarget.style.background=col+hovA;}} onMouseLeave={e2=>{if(!isSel)e2.currentTarget.style.background=col+bgA;}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:5,gap:8}}>
               <span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600,flex:1,minWidth:0}}>{e.name}</span>
               <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end",flexShrink:0}}>
@@ -1849,7 +1904,7 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
-  const [draft,setDraft]=useState({title:"",content:"",tags:""});const [aiLoading,setAiLoading]=useState(false);
+  const [draft,setDraft]=useState({title:"",content:"",tags:"",status:"in-progress"});const [aiLoading,setAiLoading]=useState(false);
   const toggleLock=()=>{
     if(!isAdmin||!sel)return;
     const willLock=!sel.lockedBy;
@@ -1870,7 +1925,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     if(n)openNote(n);
     onOpened&&onOpened();
   },[openId]);
-  const startNew=()=>{setDraft({title:"",content:"",tags:""});setCreating(true);setSel(null);setShowDetail(true);};
+  const startNew=()=>{setDraft({title:"",content:"",tags:"",status:"in-progress"});setCreating(true);setSel(null);setShowDetail(true);};
   const finalizeSave=(n,kind)=>{
     if(kind==="new"){setNotes(p=>[n,...p]);setSel(n);setCreating(false);logActivity("notebook","added",n.title,username);}
     else{setNotes(p=>p.map(x=>x.id===n.id?n:x));setSel(n);setEditing(false);logActivity("notebook","edited",n.title,username);}
@@ -1888,8 +1943,8 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     setPendingSave(n);setPendingKind(kind);
     setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
   };
-  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null,createdBy:username||"",lockedBy:null};stageSave(n,"new");};
-  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean)};stageSave(u,"edit");};
+  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null,createdBy:username||"",lockedBy:null,status:draft.status||"in-progress"};stageSave(n,"new");};
+  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),status:draft.status||"in-progress"};stageSave(u,"edit");};
   const confirmSuggested=sel2=>{
     const merged={...pendingSave,
       linkedElements:[...new Set([...(pendingSave.linkedElements||[]),...sel2.elements])],
@@ -1912,7 +1967,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     };
     setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);setManualLinkOpen(false);
   };
-  const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", ")});setEditing(true);};
+  const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", "),status:sel.status||"in-progress"});setEditing(true);};
   const del=id=>{
     const n=notes.find(x=>x.id===id);
     if(n?.lockedBy&&!isAdmin)return;
@@ -1926,12 +1981,13 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
       {creating&&<>
         <Input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Title…" style={{fontFamily:serif,fontSize:14}}/>
         <Input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags (comma-separated)…"/>
+        <div><SLabel accent={C.purple}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
         <Textarea value={draft.content} onChange={e=>setDraft(d=>({...d,content:e.target.value}))} placeholder="Write your lab notes here…" rows={10}/>
         <div style={{display:"flex",gap:8}}><Btn onClick={saveNew} accent={C.green}>Save</Btn><Btn onClick={()=>{setCreating(false);setShowDetail(false);}} accent={C.muted} outlined>Cancel</Btn></div>
       </>}
       {sel&&!creating&&!editing&&(()=>{const noteLocked=!!sel.lockedBy;const noteCanEdit=!noteLocked||isAdmin;return<>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-          <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}><span style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{sel.title}</span><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div></div>
+          <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}><span style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{sel.title}</span><StatusPill status={sel.status||"in-progress"}/><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div></div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
             {noteCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
             {noteCanEdit&&<Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn>}
@@ -1949,6 +2005,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
       {sel&&editing&&<>
         <Input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Title…" style={{fontFamily:serif,fontSize:14}}/>
         <Input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags…"/>
+        <div><SLabel accent={C.purple}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
         <Textarea value={draft.content} onChange={e=>setDraft(d=>({...d,content:e.target.value}))} rows={10}/>
         <div style={{display:"flex",gap:8}}><Btn onClick={saveEdit} accent={C.green}>Save</Btn><Btn onClick={()=>setEditing(false)} accent={C.muted} outlined>Cancel</Btn></div>
       </>}
@@ -1965,7 +2022,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
         {notes.map(n=>(
           <div key={n.id} onClick={()=>openNote(n)} style={{background:sel?.id===n.id&&showDetail&&!isMobile?"#12172a":C.panel,border:`1px solid ${sel?.id===n.id&&showDetail&&!isMobile?C.blue+"55":C.border}`,borderRadius:7,padding:"12px 14px",cursor:"pointer",transition:"all 0.12s"}}
             onMouseEnter={e2=>e2.currentTarget.style.background="#0e1220"} onMouseLeave={e2=>e2.currentTarget.style.background=C.panel}>
-            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{n.title}</span><LockBadge lockedBy={n.lockedBy} small/></div>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{n.title}</span><StatusPill status={n.status||"in-progress"} small/><LockBadge lockedBy={n.lockedBy} small/></div>
             <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginBottom:6}}>{n.date}</div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{n.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
           </div>
@@ -1974,7 +2031,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
       {/* Mobile: sheet */}
       {isMobile&&<Sheet open={showDetail} onClose={()=>{setShowDetail(false);setCreating(false);setEditing(false);}} title={creating?"New Entry":sel?.title||""}>{detailContent}</Sheet>}
       {/* Desktop: inline */}
-      {!isMobile&&showDetail&&sel&&<div style={{position:"absolute",top:52,right:0,bottom:0,width:340,background:C.surface,borderLeft:`1px solid ${C.border}`,overflowY:"auto",padding:20,zIndex:10}}><button onClick={()=>setShowDetail(false)} style={{position:"absolute",top:16,right:16,background:"none",border:"none",color:C.muted,fontSize:18}}>✕</button>{detailContent}</div>}
+      {!isMobile&&showDetail&&<div style={{position:"absolute",top:52,right:0,bottom:0,width:340,background:C.surface,borderLeft:`1px solid ${C.border}`,overflowY:"auto",padding:20,zIndex:10}}><button onClick={()=>{setShowDetail(false);setCreating(false);setEditing(false);}} style={{position:"absolute",top:16,right:16,background:"none",border:"none",color:C.muted,fontSize:18}}>✕</button>{detailContent}</div>}
     </div>
   );
 }
