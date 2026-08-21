@@ -789,7 +789,7 @@ const STATUS_HOVER_ALPHA = { "on-hold":"10", "in-progress":"18", "complete":"25"
 const STATUS_SIDES = {
   "complete":    { top:true,  right:true,  bottom:true },
   "in-progress": { top:true,  right:false, bottom:false },
-  "on-hold":     { top:false, right:true, bottom:true },
+  "on-hold":     { top:false, right:false, bottom:true },
 };
 function statusBorderStyle(status,col){
   const sides = STATUS_SIDES[status] || STATUS_SIDES["in-progress"];
@@ -1535,10 +1535,10 @@ function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,on
         <div style={{fontFamily:mono,fontSize:10,color:C.faint,textAlign:"center",padding:"4px 0"}}>Tap any element to explore it.</div>
       </div>
 
-      {/* Desktop: fixed right panel */}
-      {!isMobile&&(
+      {/* Desktop: fixed right panel — only shown once an element is selected */}
+      {!isMobile&&selected&&(
         <div style={{width:290,flexShrink:0,background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-          {selected?panelContent:<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,padding:24,textAlign:"center"}}><div style={{fontSize:36,opacity:0.12}}>⚛</div><div style={{fontFamily:serif,fontSize:14,color:C.muted,fontWeight:600}}>Select an element</div><div style={{fontFamily:mono,fontSize:10,color:C.faint,lineHeight:1.9}}>Click any tile to see its properties,<br/>chemistry notes, and links<br/>across all your sections.</div></div>}
+          {panelContent}
         </div>
       )}
 
@@ -1903,8 +1903,14 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // ═══════════════════════════════════════════════════════════════════════════════
 function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
+  const [categories,setCategories]=useLS("priabora-categories",DEFAULT_CATEGORIES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
-  const [draft,setDraft]=useState({title:"",content:"",tags:"",status:"in-progress"});const [aiLoading,setAiLoading]=useState(false);
+  const [draft,setDraft]=useState({title:"",content:"",tags:"",status:"in-progress",categories:[]});const [aiLoading,setAiLoading]=useState(false);
+  const toggleCat=id=>setDraft(d=>({...d,categories:(d.categories||[]).includes(id)?d.categories.filter(x=>x!==id):[...(d.categories||[]),id]}));
+  const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>(d.categories||[]).includes(label)?d:{...d,categories:[...(d.categories||[]),label]});};
+  const [search,setSearch]=useState("");const [filterCat,setFilterCat]=useState("All");
+  const [addingCat,setAddingCat]=useState(false);const [newCatDraft,setNewCatDraft]=useState("");
+  const addCategory=()=>{const label=newCatDraft.trim();if(!label){setAddingCat(false);return;}if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setAddingCat(false);setNewCatDraft("");};
   const toggleLock=()=>{
     if(!isAdmin||!sel)return;
     const willLock=!sel.lockedBy;
@@ -1925,7 +1931,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     if(n)openNote(n);
     onOpened&&onOpened();
   },[openId]);
-  const startNew=()=>{setDraft({title:"",content:"",tags:"",status:"in-progress"});setCreating(true);setSel(null);setShowDetail(true);};
+  const startNew=()=>{setDraft({title:"",content:"",tags:"",status:"in-progress",categories:[]});setCreating(true);setSel(null);setShowDetail(true);};
   const finalizeSave=(n,kind)=>{
     if(kind==="new"){setNotes(p=>[n,...p]);setSel(n);setCreating(false);logActivity("notebook","added",n.title,username);}
     else{setNotes(p=>p.map(x=>x.id===n.id?n:x));setSel(n);setEditing(false);logActivity("notebook","edited",n.title,username);}
@@ -1943,8 +1949,8 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     setPendingSave(n);setPendingKind(kind);
     setSuggestData({elements:els,dbEntries:dbM,reports:repM,notes:noteM,allDb,allRep,allNote});
   };
-  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null,createdBy:username||"",lockedBy:null,status:draft.status||"in-progress"};stageSave(n,"new");};
-  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),status:draft.status||"in-progress"};stageSave(u,"edit");};
+  const saveNew=()=>{if(!draft.title.trim())return;const n={id:Date.now(),title:draft.title,date:new Date().toISOString().split("T")[0],tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),content:draft.content,aiSummary:null,createdBy:username||"",lockedBy:null,status:draft.status||"in-progress",categories:draft.categories||[]};stageSave(n,"new");};
+  const saveEdit=()=>{const u={...sel,title:draft.title,content:draft.content,tags:draft.tags.split(",").map(t=>t.trim()).filter(Boolean),status:draft.status||"in-progress",categories:draft.categories||[]};stageSave(u,"edit");};
   const confirmSuggested=sel2=>{
     const merged={...pendingSave,
       linkedElements:[...new Set([...(pendingSave.linkedElements||[]),...sel2.elements])],
@@ -1967,7 +1973,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     };
     setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);setManualLinkOpen(false);
   };
-  const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", "),status:sel.status||"in-progress"});setEditing(true);};
+  const startEdit=()=>{setDraft({title:sel.title,content:sel.content,tags:sel.tags.join(", "),status:sel.status||"in-progress",categories:getEntryCats(sel)});setEditing(true);};
   const del=id=>{
     const n=notes.find(x=>x.id===id);
     if(n?.lockedBy&&!isAdmin)return;
@@ -1975,6 +1981,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
     if(n) logActivity("notebook","deleted",n.title,username);
   };
   const aiSummarise=async()=>{if(!sel)return;setAiLoading(true);try{const t=await callClaude("You are a chemistry tutor. Summarise this lab note (3-4 sentences), highlight key chemistry, and suggest one follow-up question.",[{role:"user",content:`Title: ${sel.title}\n\n${sel.content}`}]);const u={...sel,aiSummary:t};setNotes(p=>p.map(n=>n.id===sel.id?u:n));setSel(u);}catch{}setAiLoading(false);};
+  const filtered=notes.filter(n=>{const mc=filterCat==="All"||getEntryCats(n).includes(filterCat);const q=search.toLowerCase();return mc&&(!q||n.title.toLowerCase().includes(q)||(n.content||"").toLowerCase().includes(q)||(n.tags||[]).some(t=>t.includes(q)));});
 
   const detailContent=(
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -1982,12 +1989,13 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
         <Input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Title…" style={{fontFamily:serif,fontSize:14}}/>
         <Input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags (comma-separated)…"/>
         <div><SLabel accent={C.purple}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
+        <div><SLabel accent={C.blue}>Categories</SLabel><ChipPicker options={categories} selected={draft.categories||[]} onToggle={toggleCat} onAddNew={addNewCategoryToDraft} color={C.blue}/></div>
         <Textarea value={draft.content} onChange={e=>setDraft(d=>({...d,content:e.target.value}))} placeholder="Write your lab notes here…" rows={10}/>
         <div style={{display:"flex",gap:8}}><Btn onClick={saveNew} accent={C.green}>Save</Btn><Btn onClick={()=>{setCreating(false);setShowDetail(false);}} accent={C.muted} outlined>Cancel</Btn></div>
       </>}
       {sel&&!creating&&!editing&&(()=>{const noteLocked=!!sel.lockedBy;const noteCanEdit=!noteLocked||isAdmin;return<>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-          <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}><span style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{sel.title}</span><StatusPill status={sel.status||"in-progress"}/><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div></div>
+          <div><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}><span style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{sel.title}</span>{getEntryCats(sel).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<StatusPill status={sel.status||"in-progress"}/><LockBadge lockedBy={sel.lockedBy}/></div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{sel.date}{sel.createdBy?` · by ${sel.createdBy}`:""}</div></div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
             {noteCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
             {noteCanEdit&&<Btn onClick={()=>setManualLinkOpen(true)} accent={C.orange} small outlined>+ Add link</Btn>}
@@ -2006,6 +2014,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
         <Input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Title…" style={{fontFamily:serif,fontSize:14}}/>
         <Input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags…"/>
         <div><SLabel accent={C.purple}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
+        <div><SLabel accent={C.blue}>Categories</SLabel><ChipPicker options={categories} selected={draft.categories||[]} onToggle={toggleCat} onAddNew={addNewCategoryToDraft} color={C.blue}/></div>
         <Textarea value={draft.content} onChange={e=>setDraft(d=>({...d,content:e.target.value}))} rows={10}/>
         <div style={{display:"flex",gap:8}}><Btn onClick={saveEdit} accent={C.green}>Save</Btn><Btn onClick={()=>setEditing(false)} accent={C.muted} outlined>Cancel</Btn></div>
       </>}
@@ -2017,16 +2026,34 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
       {suggestData&&<LinkSuggestModal elements={suggestData.elements} dbEntries={suggestData.dbEntries} reports={suggestData.reports} notes={suggestData.notes} allDbEntries={suggestData.allDb} allReports={suggestData.allRep} allNotes={suggestData.allNote} excludeElements={pendingSave?.linkedElements||[]} onConfirm={confirmSuggested} onSkip={skipSuggested}/>}
       {manualLinkOpen&&sel&&<LinkSuggestModal mode="manage" allDbEntries={(dbEntries||[]).filter(e=>!(sel.linkedDbIds||[]).includes(e.id))} allReports={(reports||[]).filter(r=>!(sel.linkedReportIds||[]).includes(r.id))} allNotes={notes.filter(n=>n.id!==sel.id&&!(sel.linkedNoteIds||[]).includes(n.id))} excludeElements={sel.linkedElements||[]} onConfirm={addManualLinks} onSkip={()=>setManualLinkOpen(false)}/>}
       <Btn onClick={startNew} accent={C.green} small>+ New entry</Btn>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        <Input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search entries…"/>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <button onClick={()=>setFilterCat("All")} style={{background:filterCat==="All"?C.blue+"20":C.surface,border:`1px solid ${filterCat==="All"?C.blue+"55":C.border}`,borderRadius:5,color:filterCat==="All"?C.blue:C.muted,padding:"6px 10px",fontFamily:mono,fontSize:10,fontWeight:500,transition:"all 0.12s"}}>All</button>
+          {categories.map(cat=><button key={cat.id} onClick={()=>setFilterCat(cat.id)} style={{background:filterCat===cat.id?cat.color+"20":C.surface,border:`1px solid ${filterCat===cat.id?cat.color+"55":C.border}`,borderRadius:5,color:filterCat===cat.id?cat.color:C.muted,padding:"6px 10px",fontFamily:mono,fontSize:10,fontWeight:500,transition:"all 0.12s"}}>{cat.label}</button>)}
+          {!addingCat?<button onClick={()=>setAddingCat(true)} style={{background:"none",border:`1px dashed ${C.border}`,borderRadius:5,color:C.muted,padding:"6px 10px",fontFamily:mono,fontSize:10}}>+ New category</button>:
+          <span style={{display:"flex",gap:4}}>
+            <input autoFocus value={newCatDraft} onChange={e=>setNewCatDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addCategory();}if(e.key==="Escape"){setAddingCat(false);setNewCatDraft("");}}} placeholder="Category name…"
+              style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:5,padding:"6px 8px",color:C.text,fontFamily:mono,fontSize:10,width:120}}/>
+            <button onClick={addCategory} style={{background:C.blue+"20",border:`1px solid ${C.blue}55`,borderRadius:5,color:C.blue,padding:"6px 10px",fontFamily:mono,fontSize:10}}>Add</button>
+          </span>}
+        </div>
+      </div>
       <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:8}}>
-        {notes.length===0&&<div style={{fontFamily:mono,fontSize:11,color:C.faint,textAlign:"center",paddingTop:20}}>No entries yet</div>}
-        {notes.map(n=>(
-          <div key={n.id} onClick={()=>openNote(n)} style={{background:sel?.id===n.id&&showDetail&&!isMobile?"#12172a":C.panel,border:`1px solid ${sel?.id===n.id&&showDetail&&!isMobile?C.blue+"55":C.border}`,borderRadius:7,padding:"12px 14px",cursor:"pointer",transition:"all 0.12s"}}
-            onMouseEnter={e2=>e2.currentTarget.style.background="#0e1220"} onMouseLeave={e2=>e2.currentTarget.style.background=C.panel}>
-            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{n.title}</span><StatusPill status={n.status||"in-progress"} small/><LockBadge lockedBy={n.lockedBy} small/></div>
+        {filtered.length===0&&<div style={{fontFamily:mono,fontSize:11,color:C.faint,textAlign:"center",paddingTop:20}}>No entries yet</div>}
+        {filtered.map(n=>{const cats=getEntryCats(n);const col=catColor(cats[0],categories);const isSel=sel?.id===n.id&&showDetail&&!isMobile;const stat=n.status||"in-progress";const bgA=STATUS_BG_ALPHA[stat],hovA=STATUS_HOVER_ALPHA[stat];return(
+          <div key={n.id} onClick={()=>openNote(n)} style={{background:isSel?col+"2a":col+bgA,...statusBorderStyle(stat,col),boxShadow:isSel?`0 0 0 1px ${col}55`:"none",borderRadius:7,padding:"12px 14px",cursor:"pointer",transition:"all 0.12s"}}
+            onMouseEnter={e2=>{if(!isSel)e2.currentTarget.style.background=col+hovA;}} onMouseLeave={e2=>{if(!isSel)e2.currentTarget.style.background=col+bgA;}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}>
+              <span style={{fontFamily:serif,fontSize:14,color:C.text,fontWeight:600}}>{n.title}</span>
+              {cats.length>0&&<Pill label={categories.find(c=>c.id===cats[0])?.label||cats[0]} color={col} small/>}
+              {cats.length>1&&<Pill label={`+${cats.length-1}`} color={C.muted} small/>}
+              <LockBadge lockedBy={n.lockedBy} small/>
+            </div>
             <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginBottom:6}}>{n.date}</div>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{n.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
           </div>
-        ))}
+        );})}
       </div>
       {/* Mobile: sheet */}
       {isMobile&&<Sheet open={showDetail} onClose={()=>{setShowDetail(false);setCreating(false);setEditing(false);}} title={creating?"New Entry":sel?.title||""}>{detailContent}</Sheet>}
