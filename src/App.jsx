@@ -75,6 +75,55 @@ const COMPOUND_PROPERTY_FIELDS = [
 const catColor=(id,categories)=> (categories||DEFAULT_CATEGORIES).find(c=>c.id===id)?.color || CAT_COLOR[id] || C.blue;
 const getEntryCats=e=> (e.categories&&e.categories.length) ? e.categories : (e.category?[e.category]:[]);
 const getEntrySubs=e=> e.subcategories||[];
+
+// ── DB entry fields ───────────────────────────────────────────────────────────
+// The shared list of fields a DB entry can show (stored under "priabora-db-fields",
+// like categories). kind "prop" = a box in the Properties grid, value in
+// entry.properties[id]. kind "section" = a titled text block; the two built-ins live
+// on the entry itself (entry.history / entry.generalInfo), custom ones in
+// entry.sections[id]. "standard" fields are switched on by default.
+const DEFAULT_DB_FIELDS = [
+  ...COMPOUND_PROPERTY_FIELDS.map(([id,label])=>({id,label,kind:"prop",standard:true})),
+  {id:"history",label:"History",kind:"section",standard:true,color:C.yellow,placeholder:"Historical background, discovery, notable events…"},
+  {id:"generalInfo",label:"General Info",kind:"section",standard:true,color:C.pink,placeholder:"General overview, interesting facts…"},
+];
+const BUILTIN_SECTIONS = ["history","generalInfo"];
+const newFieldId=()=>`custom-${Date.now()}`;
+// Which fields an entry shows. entry.fields is either an array of field ids (picked by
+// hand), "standard" (follows whatever is currently standard, so changing the standard
+// set updates it), or missing — entries made before this existed, which keep their old
+// layout: standard sections, plus standard properties only on Compounds.
+function entryFieldIds(e,defs){
+  if(Array.isArray(e.fields))return e.fields;
+  const std=defs.filter(f=>f.standard);
+  if(e.fields==="standard")return std.map(f=>f.id);
+  return std.filter(f=>f.kind==="section"||getEntryCats(e).includes("Compound")).map(f=>f.id);
+}
+const entryFields=(e,defs,kind)=>{const ids=entryFieldIds(e,defs);return defs.filter(f=>f.kind===kind&&ids.includes(f.id));};
+const getSectionText=(e,id)=>BUILTIN_SECTIONS.includes(id)?(e[id]||""):(e.sections?.[id]||"");
+const sectionPatch=(e,id,v)=>BUILTIN_SECTIONS.includes(id)?{[id]:v}:{sections:{...(e.sections||{}),[id]:v}};
+// Text of the sections an entry currently shows (hidden ones keep their text but
+// don't count for element pills / link suggestions).
+const visibleSectionTexts=(e,defs)=>entryFields(e,defs,"section").map(f=>getSectionText(e,f.id));
+
+// ── Periodic Table element fields ─────────────────────────────────────────────
+// Same idea as the DB fields, stored under "priabora-pt-fields". Values live in each
+// element's elem-override-{n} under the field's id; override.fields (array of ids)
+// is set only when an element has been customised, otherwise it follows the
+// standard set. `tab` = which panel tab the field sits on; `render` picks the
+// special display some built-ins use (plain text otherwise).
+const DEFAULT_PT_FIELDS = [
+  ...[["config","Config"],["meltingPoint","Melting Pt (C)"],["boilingPoint","Boiling Pt (C)"],["electronegativity","Electronegativity"],["atomicRadius","Atomic Radius (pm)"],["ionisationEnergy","Ionisation Energy (KJ mol-1)"],["discoveredBy","Discovered"],["discoveredYear","Year"]]
+    .map(([id,label])=>({id,label,kind:"prop",tab:"info",standard:true})),
+  {id:"oxidationStates",label:"Oxidation States",kind:"section",tab:"info",standard:true,render:"pills"},
+  {id:"uses",label:"Uses",kind:"section",tab:"info",standard:true,render:"uses",color:C.teal},
+  {id:"chemistryNotes",label:"Chemistry Overview",kind:"section",tab:"chem",standard:true,placeholder:"Click to add chemistry notes…"},
+  {id:"commonCompounds",label:"Common Compounds",kind:"section",tab:"chem",standard:true,render:"compounds",color:C.green},
+  {id:"group",label:"Group",kind:"section",tab:"chem",standard:true,render:"group"},
+  {id:"history",label:"History",kind:"section",tab:"chem",standard:true,color:C.yellow},
+  {id:"generalInfo",label:"General Info",kind:"section",tab:"chem",standard:true,color:C.pink},
+];
+const PT_FIELD_GROUPS=[{label:"Properties",kind:"prop",tab:"info"},{label:"Props tab sections",kind:"section",tab:"info"},{label:"Chem tab sections",kind:"section",tab:"chem"}];
 const mono  = "'Georgia', serif";
 const serif = "'Lora', serif";
 
@@ -741,12 +790,13 @@ function TwoToneTitle({text,style}){
 }
 // Editable properties grid for DB entries categorised as "Compound" — same visual
 // pattern as ElementPanel's Props tab (2-col grid of surface cards, click-to-edit).
-function CompoundPropsGrid({properties,onSave,readOnly}){
+function CompoundPropsGrid({fields,properties,onSave,readOnly}){
+  if(!fields.length)return null;
   return (
     <div>
       <SLabel accent={C.blue}>Properties</SLabel>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
-        {COMPOUND_PROPERTY_FIELDS.map(([key,label])=>(
+        {fields.map(({id:key,label})=>(
           <div key={key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
             <div style={{fontFamily:mono,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>{label}</div>
             <EditableText value={(properties||{})[key]||""} onSave={v=>onSave(key,v)} placeholder="—" readOnly={readOnly} style={{fontFamily:mono,fontSize:11,color:C.text,fontWeight:500}}/>
@@ -1315,10 +1365,35 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
   const [linkSort,setLinkSort]=useState("recent"); // recent | alpha | type
   const [linkSearch,setLinkSearch]=useState("");
   // All element data is manually entered (e.g. from PubChem) — no AI auto-fill for the Periodic Table.
+  const [ptFields,setPtFields]=useLS("priabora-pt-fields",DEFAULT_PT_FIELDS);
+  const [showFields,setShowFields]=useState(false);
+  const ptIds=Array.isArray(override.fields)?override.fields:ptFields.filter(f=>f.standard).map(f=>f.id);
+  const visibleFields=(kind,tab)=>ptFields.filter(f=>f.kind===kind&&f.tab===tab&&ptIds.includes(f.id));
+  const setElementFields=fields=>{setOverride(p=>({...p,fields}));logActivity("table","edited",`${el.name} — fields`,username);};
+  const resetToStandardFields=()=>{setOverride(p=>{const n={...p};delete n.fields;return n;});logActivity("table","edited",`${el.name} — fields`,username);};
   const getField=k=>override[k];
-  const saveField=(k,v)=>{setOverride(p=>({...p,[k]:v}));logActivity("table","edited",`${el.name} — ${k}`,username);};
+  const saveField=(k,v)=>{setOverride(p=>({...p,[k]:v}));logActivity("table","edited",`${el.name} — ${ptFields.find(f=>f.id===k)?.label||k}`,username);};
   const joinArr=a=>(a||[]).join(", ");
   const splitArr=v=>v.split(",").map(s=>s.trim()).filter(Boolean);
+  const emptyHint=t=><span style={{color:C.faint,fontStyle:"italic",fontFamily:mono,fontSize:11}}>{t}</span>;
+  // One text section on the Props/Chem tabs. Built-ins with a `render` keep their
+  // special display (pills, bullet list, compound tiles, group callout).
+  const renderSection=f=>{
+    const fc=f.color||col;
+    if(f.render==="group") return <EditableText key={f.id} value={getField("group")||""} onSave={v=>saveField("group",v)} placeholder="Click to add group name…"
+      renderDisplay={v=>v?<><div style={{fontFamily:mono,fontSize:9,color:col,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:3}}>Group</div><div style={{fontFamily:serif,fontSize:13,color:C.text}}>{v}</div></>:<span style={{fontFamily:mono,fontSize:11,color:C.faint,fontStyle:"italic"}}>Click to add group…</span>}
+      style={{background:col+"10",border:`1px solid ${col}25`,borderRadius:7,padding:"11px 13px"}}/>;
+    let body;
+    if(f.render==="pills") body=<EditableText value={joinArr(getField(f.id))} onSave={v=>saveField(f.id,splitArr(v))} placeholder="e.g. +1, +2, -1"
+      renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{arr.map((s,i)=><Pill key={i} label={s} color={fc} small/>)}</div>:emptyHint("Click to add oxidation states…");}}/>;
+    else if(f.render==="uses") body=<EditableText value={joinArr(getField(f.id))} onSave={v=>saveField(f.id,splitArr(v))} placeholder="e.g. water treatment, alloys…" multiline
+      renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?arr.map((u,i)=><div key={i} style={{fontFamily:mono,fontSize:11,color:C.muted,paddingLeft:10,borderLeft:`2px solid ${fc}44`,marginBottom:5}}>▸ {u}</div>):emptyHint("Click to add uses…");}}/>;
+    else if(f.render==="compounds") body=<EditableText value={joinArr(getField(f.id))} onSave={v=>saveField(f.id,splitArr(v))} placeholder="e.g. NaCl, CO2…"
+      renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?<div style={{display:"flex",flexWrap:"wrap",gap:6}}>{arr.map((c,i)=><div key={i} style={{background:fc+"12",border:`1px solid ${fc}25`,borderRadius:6,padding:"7px 11px",fontFamily:mono,fontSize:11,color:C.muted}}>{c}</div>)}</div>:emptyHint("Click to add common compounds…");}}/>;
+    else body=<EditableText tag="p" value={getField(f.id)||""} onSave={v=>saveField(f.id,v)} multiline placeholder={f.placeholder||`Click to add ${f.label.toLowerCase()}…`}
+      style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${fc}44`,paddingLeft:12}}/>;
+    return <div key={f.id}><SLabel accent={fc}>{f.label}</SLabel>{body}</div>;
+  };
   const escapeRe=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
   const nameRe=new RegExp(`\\b${escapeRe(el.name)}\\b`,"i");
   // Symbol match: not embedded inside a longer word (e.g. "Li" inside "Literature" or "alkaLI"),
@@ -1364,6 +1439,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
             <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>
               <Pill label={ELEM_CAT_LABELS[el.cat]||el.cat} color={col} small/>
               <Pill label={`Period ${[8,9].includes(el.period)?el.period===8?"6":"7":el.period}`} color={C.muted} small/>
+              <button onClick={()=>setShowFields(s=>!s)} style={{background:showFields?col+"20":"none",border:`1px solid ${showFields?col+"55":C.border}`,borderRadius:3,color:showFields?col:C.muted,padding:"2px 7px",fontFamily:mono,fontSize:10,fontWeight:500,letterSpacing:"0.04em"}}>⚙ Fields</button>
             </div>
             <EditableText value={getField("keyFact")||""} onSave={v=>saveField("keyFact",v)} placeholder="Click to add a key fact…" multiline
               renderDisplay={v=>v?<>💡 {v}</>:<span style={{fontStyle:"italic",color:C.faint}}>Click to add a key fact…</span>}
@@ -1375,54 +1451,27 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
         {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?col:"transparent"}`,color:tab===t.id?col:C.muted,padding:"10px 4px",fontFamily:mono,fontSize:10,fontWeight:500,transition:"all 0.12s"}}>{t.label}</button>)}
       </div>
       <div style={{flex:1,overflowY:"auto",padding:"14px 16px"}}>
+        {showFields&&<div className="fade-up" style={{marginBottom:14,padding:"12px 14px",background:col+"0a",border:`1px solid ${col}33`,borderRadius:8}}>
+          <SLabel accent={col}>Fields for {el.name}</SLabel>
+          <FieldPicker defs={ptFields} setDefs={setPtFields} ids={ptIds} following={!Array.isArray(override.fields)} onChange={setElementFields} onUseStandard={resetToStandardFields} groups={PT_FIELD_GROUPS} noun="element" accent={col}/>
+        </div>}
         {tab==="info"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
             <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
               <div style={{fontFamily:mono,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Atomic Mass</div>
               <div style={{fontFamily:mono,fontSize:11,color:C.text,fontWeight:500}}>{el.mass} u</div>
             </div>
-            {[["config","Config"],["meltingPoint","Melting Pt (C)"],["boilingPoint","Boiling Pt (C)"],["electronegativity","Electronegativity"],["atomicRadius","Atomic Radius (pm)"],["ionisationEnergy","Ionisation Energy (KJ mol-1)"],["discoveredBy","Discovered"],["discoveredYear","Year"]].map(([key,label])=>(
+            {visibleFields("prop","info").map(({id:key,label})=>(
               <div key={key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
                 <div style={{fontFamily:mono,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>{label}</div>
                 <EditableText value={getField(key)||""} onSave={v=>saveField(key,v)} placeholder="—" style={{fontFamily:mono,fontSize:11,color:C.text,fontWeight:500}}/>
               </div>
             ))}
           </div>
-          <div>
-            <SLabel accent={col}>Oxidation States</SLabel>
-            <EditableText value={joinArr(getField("oxidationStates"))} onSave={v=>saveField("oxidationStates",splitArr(v))} placeholder="e.g. +1, +2, -1"
-              renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{arr.map((s,i)=><Pill key={i} label={s} color={col} small/>)}</div>:<span style={{color:C.faint,fontStyle:"italic",fontFamily:mono,fontSize:11}}>Click to add oxidation states…</span>;}}/>
-          </div>
-          <div>
-            <SLabel accent={C.teal}>Uses</SLabel>
-            <EditableText value={joinArr(getField("uses"))} onSave={v=>saveField("uses",splitArr(v))} placeholder="e.g. water treatment, alloys…" multiline
-              renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?arr.map((u,i)=><div key={i} style={{fontFamily:mono,fontSize:11,color:C.muted,paddingLeft:10,borderLeft:`2px solid ${C.teal}44`,marginBottom:5}}>▸ {u}</div>):<span style={{color:C.faint,fontStyle:"italic",fontFamily:mono,fontSize:11}}>Click to add uses…</span>;}}/>
-          </div>
+          {visibleFields("section","info").map(renderSection)}
         </div>}
         {tab==="chem"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:14}}>
-          <div>
-            <SLabel accent={col}>Chemistry Overview</SLabel>
-            <EditableText tag="p" value={getField("chemistryNotes")||""} onSave={v=>saveField("chemistryNotes",v)} multiline placeholder="Click to add chemistry notes…"
-              style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${col}44`,paddingLeft:12}}/>
-          </div>
-          <div>
-            <SLabel accent={C.green}>Common Compounds</SLabel>
-            <EditableText value={joinArr(getField("commonCompounds"))} onSave={v=>saveField("commonCompounds",splitArr(v))} placeholder="e.g. NaCl, CO2…"
-              renderDisplay={v=>{const arr=splitArr(v||"");return arr.length?<div style={{display:"flex",flexWrap:"wrap",gap:6}}>{arr.map((c,i)=><div key={i} style={{background:C.green+"12",border:`1px solid ${C.green}25`,borderRadius:6,padding:"7px 11px",fontFamily:mono,fontSize:11,color:C.muted}}>{c}</div>)}</div>:<span style={{color:C.faint,fontStyle:"italic",fontFamily:mono,fontSize:11}}>Click to add common compounds…</span>;}}/>
-          </div>
-          <EditableText value={getField("group")||""} onSave={v=>saveField("group",v)} placeholder="Click to add group name…"
-            renderDisplay={v=>v?<><div style={{fontFamily:mono,fontSize:9,color:col,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:3}}>Group</div><div style={{fontFamily:serif,fontSize:13,color:C.text}}>{v}</div></>:<span style={{fontFamily:mono,fontSize:11,color:C.faint,fontStyle:"italic"}}>Click to add group…</span>}
-            style={{background:col+"10",border:`1px solid ${col}25`,borderRadius:7,padding:"11px 13px"}}/>
-          <div>
-            <SLabel accent={C.yellow}>History</SLabel>
-            <EditableText tag="p" value={getField("history")||""} onSave={v=>saveField("history",v)} multiline placeholder="Click to add history…"
-              style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/>
-          </div>
-          <div>
-            <SLabel accent={C.pink}>General Info</SLabel>
-            <EditableText tag="p" value={getField("generalInfo")||""} onSave={v=>saveField("generalInfo",v)} multiline placeholder="Click to add general info…"
-              style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/>
-          </div>
+          {visibleFields("section","chem").map(renderSection)}
         </div>}
         {tab==="links"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:12}}>
           {totalLinks===0?<div style={{textAlign:"center",padding:"28px 10px",color:C.faint,fontFamily:mono,fontSize:11,lineHeight:2}}>No entries mention {el.name} yet.<br/><span style={{color:C.muted}}>Add entries to see them here.</span></div>:<>
@@ -1571,6 +1620,47 @@ function ChipPicker({options,selected,onToggle,onAddNew,color}){
     </div>
   );
 }
+// ── Field picker (DB entries + Periodic Table elements) ──────────────────────
+// Choose which fields this item shows, and (behind "Edit standard fields") which
+// ones are on by default for every item that follows the standard set. "+ New"
+// creates a custom field. `groups` splits the chips into rows: {label, kind, tab?}
+// — tab is only used by the Periodic Table (which panel tab the field sits on).
+const DB_FIELD_GROUPS=[{label:"Properties",kind:"prop"},{label:"Text sections",kind:"section"}];
+function FieldPicker({defs,setDefs,ids,following,onChange,onUseStandard,groups,noun="entry",accent=C.blue}){
+  const [managing,setManaging]=useState(false);
+  const inGroup=g=>f=>f.kind===g.kind&&(!g.tab||f.tab===g.tab);
+  const toggle=id=>onChange(ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
+  const toggleStandard=id=>setDefs(p=>p.map(f=>f.id===id?{...f,standard:!f.standard}:f));
+  // Creates the field (or reuses one with the same name, ignoring case and extra
+  // spaces, so it can't be doubled up) and returns its id.
+  const norm=s=>s.trim().replace(/\s+/g," ").toLowerCase();
+  const addField=(rawLabel,g,standard)=>{
+    const label=rawLabel.trim().replace(/\s+/g," ");
+    const existing=defs.find(f=>f.kind===g.kind&&norm(f.label)===norm(label));
+    if(existing)return existing.id;
+    const id=newFieldId();
+    const color=g.kind==="section"?CAT_PALETTE[defs.filter(f=>f.kind==="section").length%CAT_PALETTE.length]:undefined;
+    setDefs(p=>[...p,{id,label,kind:g.kind,...(g.tab?{tab:g.tab}:{}),standard,...(color?{color}:{})}]);
+    return id;
+  };
+  const addHere=g=>label=>{const id=addField(label,g,false);if(!ids.includes(id))onChange([...ids,id]);};
+  const addStandard=g=>label=>{const id=addField(label,g,true);setDefs(p=>p.map(f=>f.id===id?{...f,standard:true}:f));};
+  const sub=t=><div style={{fontFamily:mono,fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",margin:"8px 0 5px"}}>{t}</div>;
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4}}>
+        <span style={{fontFamily:mono,fontSize:10,color:C.faint}}>{following?"Following the standard fields":`Custom fields for this ${noun}`}</span>
+        {!following&&<Btn onClick={onUseStandard} accent={accent} small outlined>Use standard fields</Btn>}
+        <Btn onClick={()=>setManaging(m=>!m)} accent={accent} small outlined>{managing?"Done":"⚙ Edit standard fields"}</Btn>
+      </div>
+      {managing&&<div style={{marginTop:6,padding:"10px 12px",background:C.surface,border:`1px solid ${accent}33`,borderRadius:7}}>
+        <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.6}}>Lit fields are standard: every {noun} following the standard fields shows them{noun==="entry"?", including new entries":""}. Hiding a field never deletes what's written in it.</div>
+        {groups.map(g=>{const opts=defs.filter(inGroup(g));return <div key={g.label}>{sub(`Standard ${g.label.toLowerCase()}`)}<ChipPicker options={opts} selected={opts.filter(f=>f.standard).map(f=>f.id)} onToggle={toggleStandard} onAddNew={addStandard(g)} color={accent}/></div>;})}
+      </div>}
+      {groups.map(g=><div key={g.label}>{sub(`${g.label} on this ${noun}`)}<ChipPicker options={defs.filter(inGroup(g))} selected={ids} onToggle={toggle} onAddNew={addHere(g)} color={accent}/></div>)}
+    </div>
+  );
+}
 // ── Link list editor ──────────────────────────────────────────────────────────
 function LinkListEditor({links,onChange}){
   const add=()=>onChange([...links,{id:Date.now()+Math.random(),url:"",label:""}]);
@@ -1642,6 +1732,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const [categories,setCategories]=useLS("priabora-categories",DEFAULT_CATEGORIES);
   const [subcategories,setSubcategories]=useLS("priabora-subcategories",[]);
+  const [dbFields,setDbFields]=useLS("priabora-db-fields",DEFAULT_DB_FIELDS);
   const [search,setSearch]=useState("");const [filterCat,setFilterCat]=useState("All");
   const [selected,setSelected]=useState(null);const [showDetail,setShowDetail]=useState(false);
   const [mode,setMode]=useState("view"); // view | edit | new
@@ -1678,7 +1769,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
 
   const addCategory=()=>{const label=newCatDraft.trim();if(!label){setAddingCat(false);return;}if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setAddingCat(false);setNewCatDraft("");};
 
-  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null,status:"in-progress"});
+  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},sections:{},fields:"standard",date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null,status:"in-progress"});
   const startNew=()=>{setDraft(BLANK_DB_ENTRY());setSelected(null);setMode("new");setShowDetail(true);};
   const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{},status:selected.status||"in-progress"});setMode("edit");};
   const toggleCat=id=>setDraft(d=>({...d,categories:d.categories.includes(id)?d.categories.filter(x=>x!==id):[...d.categories,id]}));
@@ -1694,7 +1785,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
     if(!draft.name.trim())return;
     const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
     delete saved.tagsStr; delete saved.category;
-    const text=[saved.name,saved.summary,saved.history,saved.generalInfo,(saved.tags||[]).join(" ")];
+    const text=[saved.name,saved.summary,...visibleSectionTexts(saved,dbFields),(saved.tags||[]).join(" ")];
     const els=elementsMentionedIn(...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
     const dbM=entriesMentionedIn(entries,"name",saved.id,...text).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
     const repM=entriesMentionedIn(reports,"title",null,...text).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
@@ -1739,16 +1830,15 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
       <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}${STATUS_OPACITY[selected.status||"in-progress"]}`,paddingLeft:12}}>
         <AnnotatableText text={selected.summary} anns={annotations} entryType="db" entryId={selected.id} field="summary" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.green} placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/>
       </div>
-      {getEntryCats(selected).includes("Compound")&&<CompoundPropsGrid properties={selected.properties} readOnly={!dbCanEdit} onSave={(k,v)=>updateEntry(selected.id,{properties:{...(selected.properties||{}),[k]:v}})}/>}
+      <CompoundPropsGrid fields={entryFields(selected,dbFields,"prop")} properties={selected.properties} readOnly={!dbCanEdit} onSave={(k,v)=>updateEntry(selected.id,{properties:{...(selected.properties||{}),[k]:v}})}/>
       {getEntrySubs(selected).length>0&&<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{getEntrySubs(selected).map(sid=><Pill key={sid} label={subcategories.find(s=>s.id===sid)?.label||sid} color={C.purple} small/>)}</div>}
       <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{selected.tags.map(t=><Pill key={t} label={t} color={C.muted} small/>)}</div>
-      <div><SLabel accent={C.yellow}>History</SLabel>
-        <AnnotatableText text={selected.history||""} anns={annotations} entryType="db" entryId={selected.id} field="history" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.yellow} placeholder="Click to add history…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.yellow}44`,paddingLeft:12}}/>
-      </div>
-      <div><SLabel accent={C.pink}>General Info</SLabel>
-        <AnnotatableText text={selected.generalInfo||""} anns={annotations} entryType="db" entryId={selected.id} field="generalInfo" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.pink} placeholder="Click to add general info…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${C.pink}44`,paddingLeft:12}}/>
-      </div>
-      <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,selected.history,selected.generalInfo,(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
+      {entryFields(selected,dbFields,"section").map(f=>(
+        <div key={f.id}><SLabel accent={f.color}>{f.label}</SLabel>
+          <AnnotatableText text={getSectionText(selected,f.id)} anns={annotations} entryType="db" entryId={selected.id} field={f.id} username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={f.color} placeholder={`Click to add ${f.label.toLowerCase()}…`} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${f.color}44`,paddingLeft:12}}/>
+        </div>
+      ))}
+      <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,...visibleSectionTexts(selected,dbFields),(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
       {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt="" onClick={()=>window.open(p.url||p.dataUrl,"_blank")} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
@@ -1770,13 +1860,15 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
       <div><SLabel accent={C.blue}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
       <div><SLabel accent={C.blue}>Categories</SLabel><ChipPicker options={categories} selected={draft.categories} onToggle={toggleCat} onAddNew={addNewCategoryToDraft} color={C.blue}/></div>
       <div><SLabel accent={C.purple}>Subcategories</SLabel><ChipPicker options={subcategories} selected={draft.subcategories} onToggle={toggleSub} onAddNew={addNewSubcategoryToDraft} color={C.purple}/></div>
-      {draft.categories.includes("Compound")&&<div><SLabel accent={C.blue}>Properties</SLabel><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>{COMPOUND_PROPERTY_FIELDS.map(([key,label])=>(
+      <div><SLabel accent={C.blue}>Fields</SLabel><FieldPicker defs={dbFields} setDefs={setDbFields} ids={entryFieldIds(draft,dbFields)} following={draft.fields==="standard"} onChange={fields=>setDraft(d=>({...d,fields}))} onUseStandard={()=>setDraft(d=>({...d,fields:"standard"}))} groups={DB_FIELD_GROUPS}/></div>
+      {entryFields(draft,dbFields,"prop").length>0&&<div><SLabel accent={C.blue}>Properties</SLabel><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>{entryFields(draft,dbFields,"prop").map(({id:key,label})=>(
         <Input key={key} value={draft.properties?.[key]||""} onChange={e=>setDraft(d=>({...d,properties:{...d.properties,[key]:e.target.value}}))} placeholder={label}/>
       ))}</div></div>}
       <div><SLabel accent={C.teal}>Links</SLabel><LinkListEditor links={draft.links} onChange={links=>setDraft(d=>({...d,links}))}/></div>
       <div><SLabel accent={C.green}>Photos</SLabel><PhotoPicker photos={draft.photos} onChange={photos=>setDraft(d=>({...d,photos}))} entryId={draft.id}/></div>
-      <div><SLabel accent={C.yellow}>History</SLabel><Textarea value={draft.history||""} onChange={e=>setDraft(d=>({...d,history:e.target.value}))} placeholder="Historical background, discovery, notable events…" rows={4}/></div>
-      <div><SLabel accent={C.pink}>General Info</SLabel><Textarea value={draft.generalInfo||""} onChange={e=>setDraft(d=>({...d,generalInfo:e.target.value}))} placeholder="General overview, interesting facts…" rows={4}/></div>
+      {entryFields(draft,dbFields,"section").map(f=>(
+        <div key={f.id}><SLabel accent={f.color}>{f.label}</SLabel><Textarea value={getSectionText(draft,f.id)} onChange={e=>{const v=e.target.value;setDraft(d=>({...d,...sectionPatch(d,f.id,v)}));}} placeholder={f.placeholder||`${f.label}…`} rows={4}/></div>
+      ))}
       <div style={{display:"flex",gap:8,paddingBottom:12}}><Btn onClick={saveEntry} accent={C.green}>Save entry</Btn><Btn onClick={()=>{setMode("view");if(!selected)setShowDetail(false);}} accent={C.muted} outlined>Cancel</Btn></div>
     </div>
   );
