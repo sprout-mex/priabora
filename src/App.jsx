@@ -1793,6 +1793,33 @@ function LinkListEditor({links,onChange}){
   );
 }
 // ── Photo picker (auto-compressed) ────────────────────────────────────────────
+// Deletes photos' files from the "photos" storage bucket (fire-and-forget).
+function removeStoredPhotos(photos){
+  const paths=(photos||[]).map(p=>p.path).filter(Boolean);
+  if(!paths.length)return;
+  supabase.storage.from("photos").remove(paths)
+    .then(({error})=>{ if(error) console.error("Photo delete failed",error); })
+    .catch(e=>console.error("Photo delete failed",e));
+}
+// Photos that were in `before` but aren't in `after` (matched by id).
+const droppedPhotos=(before,after)=>(before||[]).filter(p=>!(after||[]).some(q=>q.id===p.id));
+// Opens a photo in a new tab. With a description, the tab is a small dark page
+// showing the photo with its description underneath (a raw image link can't show
+// text). That page is written on the spot, so refreshing the tab leaves it blank;
+// the photo's own URL stays permanent.
+function openPhoto(p){
+  const src=p.url||p.dataUrl;
+  const caption=(p.caption||"").trim();
+  if(!caption){window.open(src,"_blank");return;}
+  const w=window.open("","_blank");
+  if(!w){window.open(src,"_blank");return;}
+  const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(caption.slice(0,60))}</title>
+<style>body{margin:0;background:${C.bg};color:${C.text};font-family:Georgia,serif;display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px 16px}
+img{max-width:100%;max-height:80vh;border-radius:8px;border:1px solid ${C.border}}p{max-width:720px;margin:0;font-size:15px;line-height:1.8;color:${C.muted};white-space:pre-wrap}</style>
+</head><body><img src="${esc(src)}" alt=""><p>${esc(caption)}</p></body></html>`);
+  w.document.close();
+}
 function PhotoPicker({photos,onChange,entryId}){
   const inputRef=useRef();
   const [uploading,setUploading]=useState(false);
@@ -1813,20 +1840,22 @@ function PhotoPicker({photos,onChange,entryId}){
     onChange([...photos,...uploaded]);
     setUploading(false);
   };
-  const rm=async id=>{
-    const photo=photos.find(p=>p.id===id);
-    onChange(photos.filter(p=>p.id!==id));
-    if(photo?.path){ try{ await supabase.storage.from("photos").remove([photo.path]); }catch(e){ console.error("Photo delete failed",e); } }
-  };
+  // Only removes it from the draft — the stored file is deleted when the entry is
+  // saved (see removeStoredPhotos), so Cancel can still bring it back.
+  const rm=id=>onChange(photos.filter(p=>p.id!==id));
+  const setCaption=(id,caption)=>onChange(photos.map(p=>p.id===id?{...p,caption}:p));
   return (
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-        {photos.map(p=>(
-          <div key={p.id} style={{position:"relative"}}>
-            <img src={p.url||p.dataUrl} alt="" style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`}}/>
+      {photos.map(p=>(
+        <div key={p.id} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+          <div style={{position:"relative",flexShrink:0}}>
+            <img src={p.url||p.dataUrl} alt="" style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,display:"block"}}/>
             <button onClick={()=>rm(p.id)} style={{position:"absolute",top:-6,right:-6,background:C.bg,border:`1px solid ${C.border}`,borderRadius:"50%",width:18,height:18,color:C.faint,fontSize:10,lineHeight:1}}>✕</button>
           </div>
-        ))}
+          <Textarea value={p.caption||""} onChange={e=>setCaption(p.id,e.target.value)} placeholder="Description… (shown with the photo when opened)" rows={3}/>
+        </div>
+      ))}
+      <div>
         <button onClick={()=>inputRef.current.click()} disabled={uploading} style={{width:74,height:74,borderRadius:6,border:`1px dashed ${C.border}`,background:C.surface,color:C.muted,fontSize:uploading?11:20}}>{uploading?"…":"+"}</button>
       </div>
       <input ref={inputRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{if(e.target.files.length)addFiles(e.target.files);e.target.value="";}}/>
@@ -1857,7 +1886,7 @@ function DatabaseModule({entries,setEntries,openId,onOpened,onNavigate,reports,n
     const e=entries.find(x=>x.id===id);
     if(e?.lockedBy&&!isAdmin)return; // locked entries can't be deleted by non-admins
     setEntries(p=>p.filter(x=>x.id!==id));setSelected(null);setShowDetail(false);setMode("view");
-    if(e) logActivity("db","deleted",e.name,username);
+    if(e){ logActivity("db","deleted",e.name,username); removeStoredPhotos(e.photos); }
   };
   const openEntry=e=>{setSelected(e);setMode("view");setShowDetail(true);setDbTab("entry");};
   useEffect(()=>{
@@ -1899,9 +1928,14 @@ function DatabaseModule({entries,setEntries,openId,onOpened,onNavigate,reports,n
   const toggleSub=id=>setDraft(d=>({...d,subcategories:d.subcategories.includes(id)?d.subcategories.filter(x=>x!==id):[...d.subcategories,id]}));
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
   const addNewSubcategoryToDraft=label=>{if(!subcategories.some(s=>s.id===label)){setSubcategories(p=>[...p,{id:label,label}]);}setDraft(d=>d.subcategories.includes(label)?d:{...d,subcategories:[...d.subcategories,label]});};
+  // Photos uploaded during this edit but never saved are deleted from storage.
+  const cancelEdit=()=>{
+    removeStoredPhotos(droppedPhotos(draft?.photos,mode==="edit"?selected?.photos:[]));
+    setMode("view");if(!selected)setShowDetail(false);
+  };
   const finalizeSave=saved=>{
     if(mode==="new"){setEntries(p=>[saved,...p]);setSelected(saved);logActivity("db","added",saved.name,username);}
-    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));setSelected(saved);logActivity("db","edited",saved.name,username);}
+    else{setEntries(p=>p.map(e=>e.id===saved.id?saved:e));removeStoredPhotos(droppedPhotos(selected?.photos,saved.photos));setSelected(saved);logActivity("db","edited",saved.name,username);}
     setMode("view");
   };
   const saveEntry=()=>{
@@ -1999,7 +2033,7 @@ function DatabaseModule({entries,setEntries,openId,onOpened,onNavigate,reports,n
       <ElementMentionPills elements={elementsMentionedIn(elemAliases,selected.name,(selected.aliases||[]).join(" \n "),selected.summary,...visibleSectionTexts(selected,dbFields),(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
-      {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt="" onClick={()=>window.open(p.url||p.dataUrl,"_blank")} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
+      {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt={p.caption||""} title={p.caption||""} onClick={()=>openPhoto(p)} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
       <p style={{fontFamily:mono,fontSize:10,color:C.faint}}>Added {selected.date}{selected.createdBy?` · by ${selected.createdBy}`:""}</p>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {dbCanEdit&&<Btn onClick={startEdit} accent={C.blue} small>Edit</Btn>}
@@ -2030,7 +2064,7 @@ function DatabaseModule({entries,setEntries,openId,onOpened,onNavigate,reports,n
       {entryFields(draft,dbFields,"section").map(f=>(
         <div key={f.id}><SLabel accent={f.color}>{f.label}</SLabel><Textarea value={getSectionText(draft,f.id)} onChange={e=>{const v=e.target.value;setDraft(d=>({...d,...sectionPatch(d,f.id,v)}));}} placeholder={f.placeholder||`${f.label}…`} rows={4}/></div>
       ))}
-      <div style={{display:"flex",gap:8,paddingBottom:12}}><Btn onClick={saveEntry} accent={C.green}>Save entry</Btn><Btn onClick={()=>{setMode("view");if(!selected)setShowDetail(false);}} accent={C.muted} outlined>Cancel</Btn></div>
+      <div style={{display:"flex",gap:8,paddingBottom:12}}><Btn onClick={saveEntry} accent={C.green}>Save entry</Btn><Btn onClick={cancelEdit} accent={C.muted} outlined>Cancel</Btn></div>
     </div>
   );
 
