@@ -374,17 +374,26 @@ function entriesMentionedIn(list, nameKey, excludeId, ...parts) {
 // DB entries keep theirs on the entry (entry.aliases). Element ones are keyed by
 // element number in one "priabora-elem-aliases" value, owned by App and shared
 // through this context so every module's name matching sees the same list.
-const ElemAliasesContext = createContext({aliases:{},setAliases:()=>{}});
+// The context also carries element links ("priabora-elem-links"), keyed by element
+// number: {db:[ids], reports:[ids], notes:[ids], elements:[ns], ignored:["db:12",…]}
+// — kept here rather than in elem-override-{n} so DB entries can see them too.
+const ElementsContext = createContext({aliases:{},setAliases:()=>{},links:{},setLinks:()=>{}});
 const MIN_ALIAS_MATCH = 3; // shorter aka names are too likely to false-match in text
 const normName = s => s.trim().replace(/\s+/g," ").toLowerCase();
 const entryNames = e => [e.name,...(e.aliases||[])].filter(n=>n&&n.trim());
 const elementAliases = (el,aliases) => (aliases||{})[el.n]||[];
 
+// ── Text scanned for mentions, per entry type ─────────────────────────────────
+const dbTexts = (e,defs) => [e.name,(e.aliases||[]).join(" \n "),e.summary,...visibleSectionTexts(e,defs),(e.tags||[]).join(" ")];
+const reportTexts = r => [r.title,r.method,r.results,r.discussion,r.conclusion,(r.tags||[]).join(" ")];
+const noteTexts = n => [n.title,n.content,(n.tags||[]).join(" ")];
+const uniq = a => [...new Set(a)];
+
 // Finds which periodic-table elements are mentioned in arbitrary text (name or symbol),
 // using the same word-bounded logic as ElementPanel's own linking (avoids false positives
 // like "Li" inside "nucleophilic", but still catches formula-style text like "LiCl").
 const _escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-// `aliases` = the element aka names from ElemAliasesContext.
+// `aliases` = the element aka names from ElementsContext.
 function elementsMentionedIn(aliases, ...parts) {
   const combined = parts.filter(Boolean).join(" \n ");
   if (!combined) return [];
@@ -1120,7 +1129,7 @@ function LinkSuggestModal({elements=[],dbEntries=[],reports=[],notes=[],allDbEnt
   const shownRepIds=new Set([...reports.map(e=>e.id),...manualRep.map(e=>e.id)]);
   const shownNoteIds=new Set([...notes.map(e=>e.id),...manualNote.map(e=>e.id)]);
 
-  const {aliases:elemAliases}=useContext(ElemAliasesContext);
+  const {aliases:elemAliases}=useContext(ElementsContext);
   const q=search.trim().toLowerCase();
   const searchResults = q.length>0 ? {
     el: ELEMENTS.filter(e=>!shownElIds.has(e.n)&&([e.name,...elementAliases(e,elemAliases)].some(n=>n.toLowerCase().includes(q))||e.sym.toLowerCase().includes(q))).slice(0,6),
@@ -1246,6 +1255,86 @@ function LinkedEntriesDisplay({entry,dbEntries,reports,notes,onNavigate}) {
             onMouseEnter={e2=>e2.currentTarget.style.background=C.purple+"25"} onMouseLeave={e2=>e2.currentTarget.style.background=C.purple+"14"}>◻ {n.title}</button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Links browser (Links tab on elements and DB entries) ─────────────────────
+// Two groups with shared search / type filter / sort: "Linked" (confirmed, stored
+// links in either direction) and "Suggested" (live text mentions not yet linked or
+// ignored). Nothing becomes a link until someone clicks Link.
+// item: {type:"db"|"reports"|"notebook"|"table", id, ref, title, date?, sub?, color?}
+const LINK_TYPE_META={
+  db:{label:"Reference DB",short:"DB",color:C.green,nav:"db"},
+  reports:{label:"Lab Reports",short:"Reports",color:C.teal,nav:"reports"},
+  notebook:{label:"Notebook",short:"Notes",color:C.purple,nav:"notebook"},
+  table:{label:"Element",short:"Elements",color:C.orange,nav:"table"},
+};
+const LINK_SORTS=[{id:"recent",label:"Most recent"},{id:"alpha",label:"A–Z"},{id:"type",label:"By type"}];
+const linkKey=item=>`${item.type}:${item.id}`;
+const linkItem={
+  db:e=>({type:"db",id:e.id,ref:e,title:e.name,date:e.date,sub:getEntryCats(e)[0]}),
+  reports:r=>({type:"reports",id:r.id,ref:r,title:r.title,date:r.date}),
+  notebook:n=>({type:"notebook",id:n.id,ref:n,title:n.title,date:n.date}),
+  table:el=>({type:"table",id:el.n,ref:{id:el.n},title:el.name,sub:el.sym,color:ELEM_CAT[el.cat]}),
+};
+function LinksBrowser({linked,suggested,onNavigate,onLink,onIgnore,canEdit,accent,name}){
+  const [filter,setFilter]=useState("all");
+  const [sort,setSort]=useState("recent");
+  const [search,setSearch]=useState("");
+  const all=[...linked,...suggested];
+  if(!all.length) return <div style={{textAlign:"center",padding:"28px 10px",color:C.faint,fontFamily:mono,fontSize:11,lineHeight:2}}>Nothing links to or mentions {name} yet.<br/><span style={{color:C.muted}}>Links and mentions will show up here.</span></div>;
+  const q=search.trim().toLowerCase();
+  const prep=list=>list.filter(l=>(filter==="all"||l.type===filter)&&(!q||(l.title||"").toLowerCase().includes(q))).sort((a,b)=>{
+    if(sort==="alpha") return (a.title||"").localeCompare(b.title||"");
+    if(sort==="type") return LINK_TYPE_META[a.type].label.localeCompare(LINK_TYPE_META[b.type].label) || (a.title||"").localeCompare(b.title||"");
+    return (b.date||"").localeCompare(a.date||""); // recent first (default)
+  });
+  const shownLinked=prep(linked),shownSuggested=prep(suggested);
+  const filters=[{id:"all",label:"All"},...["db","reports","notebook","table"].filter(t=>t!=="table"||all.some(l=>l.type==="table")).map(t=>({id:t,label:LINK_TYPE_META[t].short}))];
+  const smallBtn=(c,filled)=>({background:filled?c+"1a":"none",border:`1px solid ${filled?c+"55":C.border}`,borderRadius:5,color:filled?c:C.muted,padding:"3px 9px",fontFamily:mono,fontSize:10,fontWeight:500});
+  const row=(item,suggest)=>{const meta=LINK_TYPE_META[item.type];const c=item.color||meta.color;return(
+    <div key={linkKey(item)} onClick={()=>onNavigate(meta.nav,item.ref)} style={{background:C.surface,border:`1px solid ${c}22`,borderLeft:`3px solid ${suggest?c+"55":c}`,borderRadius:6,padding:"10px 12px",cursor:"pointer"}} onMouseEnter={e2=>e2.currentTarget.style.background=c+"0c"} onMouseLeave={e2=>e2.currentTarget.style.background=C.surface}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+        <div style={{fontFamily:serif,fontSize:12,color:suggest?C.muted:C.text,fontWeight:600,marginBottom:2}}>{item.title}</div>
+        <Pill label={meta.label} color={c} small/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+        {item.date&&<span style={{fontFamily:mono,fontSize:9,color:C.muted}}>{item.date}</span>}
+        {item.sub&&<Pill label={item.sub} color={c} small/>}
+        {suggest&&canEdit&&<span style={{marginLeft:"auto",display:"flex",gap:6}}>
+          <button onClick={e=>{e.stopPropagation();onLink(item);}} style={smallBtn(C.teal,true)}>Link</button>
+          <button onClick={e=>{e.stopPropagation();onIgnore(item);}} style={smallBtn(C.muted,false)}>Ignore</button>
+        </span>}
+      </div>
+    </div>
+  );};
+  const none=<div style={{textAlign:"center",padding:"10px",color:C.faint,fontFamily:mono,fontSize:11}}>None{q||filter!=="all"?" matching":""}.</div>;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <Input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search links…"/>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+        {filters.map(f=>{const cnt=f.id==="all"?all.length:all.filter(l=>l.type===f.id).length;const active=filter===f.id;const fcol=f.id==="all"?accent:LINK_TYPE_META[f.id].color;return(
+          <button key={f.id} onClick={()=>setFilter(f.id)} disabled={cnt===0&&f.id!=="all"} style={{background:active?fcol+"22":C.surface,border:`1px solid ${active?fcol+"66":C.border}`,borderRadius:5,color:cnt===0&&f.id!=="all"?C.faint:active?fcol:C.muted,padding:"5px 9px",fontFamily:mono,fontSize:10,fontWeight:500,opacity:cnt===0&&f.id!=="all"?0.4:1,transition:"all 0.12s"}}>{f.label} ({cnt})</button>
+        );})}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontFamily:mono,fontSize:9,color:C.faint,textTransform:"uppercase",letterSpacing:"0.06em"}}>Sort</span>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+          {LINK_SORTS.map(s=>{const active=sort===s.id;return(
+            <button key={s.id} onClick={()=>setSort(s.id)} style={{background:active?accent+"18":"transparent",border:`1px solid ${active?accent+"55":C.border}`,borderRadius:5,color:active?accent:C.muted,padding:"4px 8px",fontFamily:mono,fontSize:9,fontWeight:500,transition:"all 0.12s"}}>{s.label}</button>
+          );})}
+        </div>
+      </div>
+      <div>
+        <SLabel accent={C.teal}>Linked ({linked.length})</SLabel>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{shownLinked.length?shownLinked.map(i=>row(i,false)):none}</div>
+      </div>
+      {suggested.length>0&&<div>
+        <SLabel accent={C.muted}>Suggested ({suggested.length})</SLabel>
+        <div style={{fontFamily:mono,fontSize:10,color:C.faint,marginTop:-4,marginBottom:8}}>Mentioned in the text but not linked yet{canEdit?" — Link to keep, Ignore to hide.":"."}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{shownSuggested.length?shownSuggested.map(i=>row(i,true)):none}</div>
+      </div>}
     </div>
   );
 }
@@ -1384,9 +1473,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
   const [editNote,setEditNote]=useState(false);
   const [noteDraft,setNoteDraft]=useState("");
   const [override,setOverride]=useLS(`elem-override-${el.n}`,{});
-  const [linkFilter,setLinkFilter]=useState("all"); // all | db | reports | notebook
-  const [linkSort,setLinkSort]=useState("recent"); // recent | alpha | type
-  const [linkSearch,setLinkSearch]=useState("");
+  const [suggest,setSuggest]=useState(null); // save-time link suggestions popup
   // All element data is manually entered (e.g. from PubChem) — no AI auto-fill for the Periodic Table.
   const [ptFields,setPtFields]=useLS("priabora-pt-fields",DEFAULT_PT_FIELDS);
   const [showFields,setShowFields]=useState(false);
@@ -1395,7 +1482,12 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
   const setElementFields=fields=>{setOverride(p=>({...p,fields}));logActivity("table","edited",`${el.name} — fields`,username);};
   const resetToStandardFields=()=>{setOverride(p=>{const n={...p};delete n.fields;return n;});logActivity("table","edited",`${el.name} — fields`,username);};
   const getField=k=>override[k];
-  const saveField=(k,v)=>{setOverride(p=>({...p,[k]:v}));logActivity("table","edited",`${el.name} — ${ptFields.find(f=>f.id===k)?.label||k}`,username);};
+  const textOf=v=>Array.isArray(v)?v.join(", "):(v||"");
+  const saveField=(k,v)=>{
+    const before=textOf(override[k]);
+    setOverride(p=>({...p,[k]:v}));logActivity("table","edited",`${el.name} — ${ptFields.find(f=>f.id===k)?.label||k}`,username);
+    offerLinks(before,textOf(v));
+  };
   const joinArr=a=>(a||[]).join(", ");
   const splitArr=v=>v.split(",").map(s=>s.trim()).filter(Boolean);
   const emptyHint=t=><span style={{color:C.faint,fontStyle:"italic",fontFamily:mono,fontSize:11}}>{t}</span>;
@@ -1418,7 +1510,7 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
     return <div key={f.id}><SLabel accent={fc}>{f.label}</SLabel>{body}</div>;
   };
   const escapeRe=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-  const {aliases:elemAliases,setAliases:setElemAliases}=useContext(ElemAliasesContext);
+  const {aliases:elemAliases,setAliases:setElemAliases}=useContext(ElementsContext);
   const myAliases=elementAliases(el,elemAliases);
   const saveAliases=v=>{setElemAliases(p=>({...p,[el.n]:splitArr(v)}));logActivity("table","edited",`${el.name} — other names`,username);};
   const nameRes=[el.name,...myAliases.filter(a=>a.trim().length>=MIN_ALIAS_MATCH)].map(n=>new RegExp(`\\b${escapeRe(n.trim())}\\b`,"i"));
@@ -1426,32 +1518,53 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
   // but still matches formula-style concatenation like "LiCl" or "Li2CO3".
   const symRe=new RegExp(`(?<![A-Za-z])${escapeRe(el.sym)}(?![a-z])`);
   const matches=t=>t&&(nameRes.some(re=>re.test(t))||symRe.test(t));
-  const linkedDb=dbEntries.filter(e=>matches(e.name)||matches(e.summary)||e.tags?.some(t=>matches(t)));
-  const linkedReports=reports.filter(r=>matches(r.title)||matches(r.method)||matches(r.results)||matches(r.discussion)||r.tags?.some(t=>matches(t)));
-  const linkedNotes=notes.filter(n=>matches(n.title)||matches(n.content)||n.tags?.some(t=>matches(t)));
-  const totalLinks=linkedDb.length+linkedReports.length+linkedNotes.length;
-  const LINK_TYPE_META={
-    db:{label:"Reference DB",color:C.green,nav:"db"},
-    reports:{label:"Lab Reports",color:C.teal,nav:"reports"},
-    notebook:{label:"Notebook",color:C.purple,nav:"notebook"},
+  // Links: confirmed = stored on the other entry (its linkedElements) or on this
+  // element (priabora-elem-links); suggested = live mentions not yet linked/ignored.
+  const {links:elemLinks,setLinks:setElemLinks}=useContext(ElementsContext);
+  const myLinks=elemLinks[el.n]||{};
+  const ignored=myLinks.ignored||[];
+  const updateMyLinks=fn=>setElemLinks(p=>({...p,[el.n]:fn(p[el.n]||{})}));
+  const linkedTo=(x,key)=>(x.linkedElements||[]).includes(el.n)||(myLinks[key]||[]).includes(x.id);
+  const linkedDb=dbEntries.filter(e=>linkedTo(e,"db"));
+  const linkedReports=reports.filter(r=>linkedTo(r,"reports"));
+  const linkedNotes=notes.filter(n=>linkedTo(n,"notes"));
+  const linkedEls=ELEMENTS.filter(x=>x.n!==el.n&&((myLinks.elements||[]).includes(x.n)||(elemLinks[x.n]?.elements||[]).includes(el.n)));
+  const linkedItems=[...linkedDb.map(linkItem.db),...linkedReports.map(linkItem.reports),...linkedNotes.map(linkItem.notebook),...linkedEls.map(linkItem.table)];
+  const isLinkedOrIgnored=item=>ignored.includes(linkKey(item))||linkedItems.some(l=>linkKey(l)===linkKey(item));
+  const dbMentionTexts=e=>[e.name,(e.aliases||[]).join(" "),e.summary,e.history,e.generalInfo,...Object.values(e.sections||{}),(e.tags||[]).join(" ")];
+  const suggestedItems=[
+    ...dbEntries.filter(e=>dbMentionTexts(e).some(matches)).map(linkItem.db),
+    ...reports.filter(r=>reportTexts(r).some(matches)).map(linkItem.reports),
+    ...notes.filter(n=>noteTexts(n).some(matches)).map(linkItem.notebook),
+  ].filter(i=>!isLinkedOrIgnored(i));
+  const LINK_KEY_FOR={db:"db",reports:"reports",notebook:"notes",table:"elements"};
+  const linkOne=item=>{updateMyLinks(l=>({...l,[LINK_KEY_FOR[item.type]]:uniq([...(l[LINK_KEY_FOR[item.type]]||[]),item.id])}));logActivity("table","edited",`${el.name} — linked ${item.title}`,username);};
+  const ignoreOne=item=>updateMyLinks(l=>({...l,ignored:uniq([...(l.ignored||[]),linkKey(item)])}));
+  // After a field is saved: if the new text mentions entries/elements the old text
+  // didn't (and they aren't already linked or ignored), offer them in the popup.
+  const offerLinks=(before,after)=>{
+    if(!after.trim())return;
+    const fresh=(list,key)=>{const was=new Set(entriesMentionedIn(list,key,null,before).map(x=>x.id));return entriesMentionedIn(list,key,null,after).filter(x=>!was.has(x.id));};
+    const wasEls=new Set(elementsMentionedIn(elemAliases,before).map(x=>x.n));
+    const s={
+      db:fresh(dbEntries,"name").filter(e=>!isLinkedOrIgnored(linkItem.db(e))),
+      rep:fresh(reports,"title").filter(r=>!isLinkedOrIgnored(linkItem.reports(r))),
+      nt:fresh(notes,"title").filter(n=>!isLinkedOrIgnored(linkItem.notebook(n))),
+      els:elementsMentionedIn(elemAliases,after).filter(x=>x.n!==el.n&&!wasEls.has(x.n)&&!isLinkedOrIgnored(linkItem.table(x))),
+    };
+    if(s.db.length+s.rep.length+s.nt.length+s.els.length)setSuggest(s);
   };
-  const allLinkItems=[
-    ...linkedDb.map(e=>({type:"db",id:e.id,ref:e,title:e.name,date:e.date,sub:getEntryCats(e)[0]})),
-    ...linkedReports.map(r=>({type:"reports",id:r.id,ref:r,title:r.title,date:r.date})),
-    ...linkedNotes.map(n=>({type:"notebook",id:n.id,ref:n,title:n.title,date:n.date})),
-  ];
-  const filteredLinkItems=(linkFilter==="all"?allLinkItems:allLinkItems.filter(l=>l.type===linkFilter)).filter(l=>!linkSearch.trim()||(l.title||"").toLowerCase().includes(linkSearch.trim().toLowerCase()));
-  const sortedLinkItems=[...filteredLinkItems].sort((a,b)=>{
-    if(linkSort==="alpha") return (a.title||"").localeCompare(b.title||"");
-    if(linkSort==="type") return LINK_TYPE_META[a.type].label.localeCompare(LINK_TYPE_META[b.type].label) || (a.title||"").localeCompare(b.title||"");
-    return (b.date||"").localeCompare(a.date||""); // recent first (default)
-  });
-  const LINK_FILTERS=[{id:"all",label:"All"},{id:"db",label:"DB"},{id:"reports",label:"Reports"},{id:"notebook",label:"Notes"}];
-  const LINK_SORTS=[{id:"recent",label:"Most recent"},{id:"alpha",label:"A–Z"},{id:"type",label:"By type"}];
+  const confirmSuggested=sel=>{
+    updateMyLinks(l=>({...l,db:uniq([...(l.db||[]),...sel.db]),reports:uniq([...(l.reports||[]),...sel.reports]),notes:uniq([...(l.notes||[]),...sel.notes]),elements:uniq([...(l.elements||[]),...sel.elements])}));
+    setSuggest(null);
+  };
   useEffect(()=>{ setTab("info"); },[el.n]);
-  const TABS=[{id:"info",label:"Props"},{id:"chem",label:"Chem"},{id:"links",label:`Links (${totalLinks})`},{id:"notes",label:"Notes"}];
+  const TABS=[{id:"info",label:"Props"},{id:"chem",label:"Chem"},{id:"links",label:`Links (${linkedItems.length})${suggestedItems.length?` +${suggestedItems.length}`:""}`},{id:"notes",label:"Notes"}];
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      {suggest&&<LinkSuggestModal title={`Link ${el.name} to these?`} elements={suggest.els} dbEntries={suggest.db} reports={suggest.rep} notes={suggest.nt}
+        allDbEntries={dbEntries.filter(e=>!linkedDb.includes(e))} allReports={reports.filter(r=>!linkedReports.includes(r))} allNotes={notes.filter(n=>!linkedNotes.includes(n))}
+        excludeElements={[el.n,...linkedEls.map(x=>x.n)]} onConfirm={confirmSuggested} onSkip={()=>setSuggest(null)}/>}
       <div style={{padding:"16px 18px 12px",borderBottom:`1px solid ${C.border}`,flexShrink:0,background:`linear-gradient(135deg,${col}0a 0%,transparent 55%)`}}>
         {onClose&&<button onClick={onClose} style={{float:"right",background:"none",border:"none",color:C.muted,fontSize:20,lineHeight:1,padding:"0 0 8px 8px"}}>✕</button>}
         <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
@@ -1502,38 +1615,8 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
         {tab==="chem"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:14}}>
           {visibleFields("section","chem").map(renderSection)}
         </div>}
-        {tab==="links"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:12}}>
-          {totalLinks===0?<div style={{textAlign:"center",padding:"28px 10px",color:C.faint,fontFamily:mono,fontSize:11,lineHeight:2}}>No entries mention {el.name} yet.<br/><span style={{color:C.muted}}>Add entries to see them here.</span></div>:<>
-            <Input value={linkSearch} onChange={e=>setLinkSearch(e.target.value)} placeholder="Search linked entries…"/>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-              {LINK_FILTERS.map(f=>{const cnt=f.id==="all"?allLinkItems.length:allLinkItems.filter(l=>l.type===f.id).length;const active=linkFilter===f.id;const fcol=f.id==="all"?col:LINK_TYPE_META[f.id].color;return(
-                <button key={f.id} onClick={()=>setLinkFilter(f.id)} disabled={cnt===0&&f.id!=="all"} style={{background:active?fcol+"22":C.surface,border:`1px solid ${active?fcol+"66":C.border}`,borderRadius:5,color:cnt===0&&f.id!=="all"?C.faint:active?fcol:C.muted,padding:"5px 9px",fontFamily:mono,fontSize:10,fontWeight:500,opacity:cnt===0&&f.id!=="all"?0.4:1,transition:"all 0.12s"}}>{f.label} ({cnt})</button>
-              );})}
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontFamily:mono,fontSize:9,color:C.faint,textTransform:"uppercase",letterSpacing:"0.06em"}}>Sort</span>
-              <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                {LINK_SORTS.map(s=>{const active=linkSort===s.id;return(
-                  <button key={s.id} onClick={()=>setLinkSort(s.id)} style={{background:active?col+"18":"transparent",border:`1px solid ${active?col+"55":C.border}`,borderRadius:5,color:active?col:C.muted,padding:"4px 8px",fontFamily:mono,fontSize:9,fontWeight:500,transition:"all 0.12s"}}>{s.label}</button>
-                );})}
-              </div>
-            </div>
-            {sortedLinkItems.length===0?<div style={{textAlign:"center",padding:"20px 10px",color:C.faint,fontFamily:mono,fontSize:11}}>No {LINK_TYPE_META[linkFilter]?.label.toLowerCase()} entries for {el.name}.</div>:
-            <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {sortedLinkItems.map(item=>{const meta=LINK_TYPE_META[item.type];return(
-                <div key={`${item.type}-${item.id}`} onClick={()=>onNavigate(meta.nav,item.ref)} style={{background:C.surface,border:`1px solid ${meta.color}22`,borderLeft:`3px solid ${meta.color}`,borderRadius:6,padding:"10px 12px",cursor:"pointer"}} onMouseEnter={e2=>e2.currentTarget.style.background=meta.color+"0c"} onMouseLeave={e2=>e2.currentTarget.style.background=C.surface}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-                    <div style={{fontFamily:serif,fontSize:12,color:C.text,fontWeight:600,marginBottom:2}}>{item.title}</div>
-                    <Pill label={meta.label} color={meta.color} small/>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    {item.date&&<span style={{fontFamily:mono,fontSize:9,color:C.muted}}>{item.date}</span>}
-                    {item.sub&&<Pill label={item.sub} color={meta.color} small/>}
-                  </div>
-                </div>
-              );})}
-            </div>}
-          </>}
+        {tab==="links"&&<div className="fade-up">
+          <LinksBrowser linked={linkedItems} suggested={suggestedItems} onNavigate={onNavigate} onLink={linkOne} onIgnore={ignoreOne} canEdit accent={col} name={el.name}/>
         </div>}
         {tab==="notes"&&<div className="fade-up" style={{display:"flex",flexDirection:"column",gap:10}}>
           <p style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.6}}>Personal notes for {el.name} — saved automatically.</p>
@@ -1563,7 +1646,7 @@ function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,on
   const allGroups=Array.from({length:18},(_,i)=>i+1);
   const mainRows=[1,2,3,4,5,6,7];
   const seriesRows=[8,9];
-  const {aliases:elemAliases}=useContext(ElemAliasesContext);
+  const {aliases:elemAliases}=useContext(ElementsContext);
   const matchSearch=el=>{const q=search.toLowerCase();return !q||el.name.toLowerCase().includes(q)||el.sym.toLowerCase().includes(q)||String(el.n).includes(q)||elementAliases(el,elemAliases).some(a=>a.toLowerCase().includes(q));};
   const dim=el=>(filterCat?el.cat!==filterCat:false)||!matchSearch(el);
   const renderTile=(period,group)=>{const el=EGRID[period]?.[group];if(!el)return <div key={`${period}-${group}`} style={{width:TILE,height:TILE,flexShrink:0}}/>;return <ElementTile key={el.n} el={el} selected={selected?.n===el.n} dimmed={dim(el)} onClick={handleSelect} size={TILE}/>;};
@@ -1755,9 +1838,9 @@ function PhotoPicker({photos,onChange,entryId}){
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATABASE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
-  const {aliases:elemAliases}=useContext(ElemAliasesContext);
-  const [entries,setEntries]=useCloudCollection("db",SEED_DB);
+function DatabaseModule({entries,setEntries,openId,onOpened,onNavigate,reports,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
+  const {aliases:elemAliases,links:elemLinks}=useContext(ElementsContext);
+  const [dbTab,setDbTab]=useState("entry"); // entry | links
   const [pendingSave,setPendingSave]=useState(null);
   const [suggestData,setSuggestData]=useState(null);
   const [manualLinkOpen,setManualLinkOpen]=useState(false);
@@ -1770,15 +1853,13 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   const [draft,setDraft]=useState(null);
   const [addingCat,setAddingCat]=useState(false);const [newCatDraft,setNewCatDraft]=useState("");
   const isMobile=useIsMobile();
-  const addEntry=useCallback(e=>{setEntries(p=>[e,...p]);logActivity("db","added",e.name,username);},[setEntries,username]);
-  useEffect(()=>{if(addEntryRef)addEntryRef.current=addEntry;},[addEntry,addEntryRef]);
   const del=id=>{
     const e=entries.find(x=>x.id===id);
     if(e?.lockedBy&&!isAdmin)return; // locked entries can't be deleted by non-admins
     setEntries(p=>p.filter(x=>x.id!==id));setSelected(null);setShowDetail(false);setMode("view");
     if(e) logActivity("db","deleted",e.name,username);
   };
-  const openEntry=e=>{setSelected(e);setMode("view");setShowDetail(true);};
+  const openEntry=e=>{setSelected(e);setMode("view");setShowDetail(true);setDbTab("entry");};
   useEffect(()=>{
     if(openId==null)return;
     const e=entries.find(x=>x.id===openId);
@@ -1864,8 +1945,42 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
 
   const dbLocked=!!selected?.lockedBy;
   const dbCanEdit=!dbLocked||isAdmin;
+  // Links tab. Confirmed = stored on this entry, or on the other side pointing here
+  // (another entry/report/note's linkedDbIds, or an element's priabora-elem-links).
+  // Suggested = live mentions either way (they mention this, or this mentions them)
+  // that aren't linked yet or ignored (entry.ignoredLinks).
+  let dbLinked=[],dbSuggested=[];
+  if(selected){
+    const X=selected,xTexts=dbTexts(X,dbFields);
+    const out=(k,id)=>(X[k]||[]).includes(id);
+    const mentionsX=texts=>entriesMentionedIn([X],"name",null,...texts).length>0;
+    const xMentions=(item,key)=>entriesMentionedIn([item],key,null,...xTexts).length>0;
+    dbLinked=[
+      ...entries.filter(e=>e.id!==X.id&&(out("linkedDbIds",e.id)||(e.linkedDbIds||[]).includes(X.id))).map(linkItem.db),
+      ...(reports||[]).filter(r=>out("linkedReportIds",r.id)||(r.linkedDbIds||[]).includes(X.id)).map(linkItem.reports),
+      ...(notes||[]).filter(n=>out("linkedNoteIds",n.id)||(n.linkedDbIds||[]).includes(X.id)).map(linkItem.notebook),
+      ...ELEMENTS.filter(el=>out("linkedElements",el.n)||(elemLinks[el.n]?.db||[]).includes(X.id)).map(linkItem.table),
+    ];
+    const skip=new Set([...dbLinked.map(linkKey),...(X.ignoredLinks||[])]);
+    dbSuggested=[
+      ...entries.filter(e=>e.id!==X.id&&(mentionsX(dbTexts(e,dbFields))||xMentions(e,"name"))).map(linkItem.db),
+      ...(reports||[]).filter(r=>mentionsX(reportTexts(r))||xMentions(r,"title")).map(linkItem.reports),
+      ...(notes||[]).filter(n=>mentionsX(noteTexts(n))||xMentions(n,"title")).map(linkItem.notebook),
+      ...elementsMentionedIn(elemAliases,...xTexts).map(linkItem.table),
+    ].filter(i=>!skip.has(linkKey(i)));
+  }
+  const DB_LINK_FIELD={db:"linkedDbIds",reports:"linkedReportIds",notebook:"linkedNoteIds",table:"linkedElements"};
+  const linkFromDb=item=>{const k=DB_LINK_FIELD[item.type];updateEntry(selected.id,{[k]:uniq([...(selected[k]||[]),item.id])});};
+  const ignoreFromDb=item=>updateEntry(selected.id,{ignoredLinks:uniq([...(selected.ignoredLinks||[]),linkKey(item)])});
+  const dbCol=selected?catColor(getEntryCats(selected)[0],categories):C.blue;
+  const DB_TABS=[{id:"entry",label:"Entry"},{id:"links",label:`Links (${dbLinked.length})${dbSuggested.length?` +${dbSuggested.length}`:""}`}];
   const detailContent=selected&&mode==="view"&&(
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    <div>
+    <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,marginBottom:14}}>
+      {DB_TABS.map(t=><button key={t.id} onClick={()=>setDbTab(t.id)} style={{flex:1,background:"none",border:"none",borderBottom:`2px solid ${dbTab===t.id?dbCol:"transparent"}`,color:dbTab===t.id?dbCol:C.muted,padding:"8px 4px",fontFamily:mono,fontSize:10,fontWeight:500,transition:"all 0.12s"}}>{t.label}</button>)}
+    </div>
+    {dbTab==="links"&&<div className="fade-up"><LinksBrowser linked={dbLinked} suggested={dbSuggested} onNavigate={onNavigate} onLink={linkFromDb} onIgnore={ignoreFromDb} canEdit={dbCanEdit} accent={dbCol} name={selected.name}/></div>}
+    {dbTab==="entry"&&<div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<LockBadge lockedBy={selected.lockedBy}/></div>
       <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} readOnly={!dbCanEdit} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
       <AkaLine names={selected.aliases}/>
@@ -1892,6 +2007,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
         {dbCanEdit&&<Btn onClick={()=>del(selected.id)} accent="#f87171" small outlined>Delete</Btn>}
         {isAdmin&&<LockToggleBtn locked={dbLocked} onToggle={toggleLock}/>}
       </div>
+    </div>}
     </div>
   );
 
@@ -1976,14 +2092,12 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
 // ═══════════════════════════════════════════════════════════════════════════════
 // SPECTRUM MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setReports}) {
+function SpectrumModule({onSaveToDb,setSpectraResults,dbEntries,reports,setReports}) {
   const [file,setFile]=useState(null);const [preview,setPreview]=useState(null);const [specType,setSpecType]=useState("auto");
   const [loading,setLoading]=useState(false);const [result,setResult]=useState(null);const [error,setError]=useState(null);
   const [dragOver,setDragOver]=useState(false);const [savedDb,setSavedDb]=useState(false);
   const [showLink,setShowLink]=useState(false);const [pendingSave,setPendingSave]=useState(null);
-  const [spectraResults,setSpectraResults]=useCloudCollection("spectra-meta",[]);
   const inputRef=useRef();
-  useEffect(()=>{if(spectraResultsRef)spectraResultsRef.current=spectraResults;},[spectraResults,spectraResultsRef]);
   const handleFile=useCallback(f=>{setFile(f);setResult(null);setError(null);setSavedDb(false);if(fileKind(f)==="image")setPreview(URL.createObjectURL(f));else setPreview(null);},[]);
   const analyse=async()=>{
     if(!file)return;setLoading(true);setResult(null);setError(null);setSavedDb(false);
@@ -1998,7 +2112,7 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
       const t=await callClaude(sys,messages);setResult(parseJSON(t));
     }catch(e){setError(e.message||"Analysis failed.");}setLoading(false);
   };
-  const saveToDb=()=>{if(!result||!saveToDbRef?.current)return;saveToDbRef.current({id:Date.now(),name:result.structureGuess?.name||`Spectrum ${new Date().toLocaleDateString()}`,category:"Compound",summary:result.summary||"",tags:(result.functionalGroups||[]).slice(0,4).map(g=>g.name.toLowerCase()),date:new Date().toISOString().split("T")[0]});setSavedDb(true);};
+  const saveToDb=()=>{if(!result)return;onSaveToDb({id:Date.now(),name:result.structureGuess?.name||`Spectrum ${new Date().toLocaleDateString()}`,category:"Compound",summary:result.summary||"",tags:(result.functionalGroups||[]).slice(0,4).map(g=>g.name.toLowerCase()),date:new Date().toISOString().split("T")[0]});setSavedDb(true);};
   const attachToReport=()=>{if(!result)return;setPendingSave({id:Date.now(),name:result.structureGuess?.name||`Spectrum ${new Date().toLocaleDateString()}`,spectrumType:result.spectrumType,summary:result.summary,date:new Date().toISOString().split("T")[0],resultData:result});setShowLink(true);};
   const confirmLinks=(selS,selD)=>{const meta={...pendingSave};setSpectraResults(p=>[meta,...p]);if(selS.length>0)setReports(prev=>prev.map(r=>selS.includes(r.id)?{...r,linkedSpectra:[...r.linkedSpectra,meta.id]}:r));setShowLink(false);setPendingSave(null);};
   const accent=result?.spectrumType?.includes("IR")?C.green:C.blue;
@@ -2039,9 +2153,8 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTEBOOK MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
-function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
-  const {aliases:elemAliases}=useContext(ElemAliasesContext);
-  const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
+function NotebookModule({notes,setNotes,openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
+  const {aliases:elemAliases}=useContext(ElementsContext);
   const [categories,setCategories]=useLS("priabora-categories",DEFAULT_CATEGORIES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
   const [draft,setDraft]=useState({title:"",content:"",tags:"",status:"in-progress",categories:[]});const [aiLoading,setAiLoading]=useState(false);
@@ -2213,9 +2326,8 @@ function DataTableEditor({table,onChange}){
   const setCell=(i,j,v)=>onChange(table.map((r,ri)=>r.map((c,ci)=>ri===i&&ci===j?v:c)));
   return<div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{border:`1px solid ${C.border}`,padding:0}}><input value={cell} onChange={e=>setCell(i,j,e.target.value)} onKeyDown={e=>handleScriptKeyDown(e,cell,ev=>setCell(i,j,ev.target.value))} style={{background:i===0?C.surface+"cc":C.surface,border:"none",padding:"8px 9px",color:i===0?C.text:C.muted,fontFamily:mono,fontSize:11,fontWeight:i===0?600:400,width:"100%",minWidth:80}}/></td>)}<td style={{padding:"0 4px"}}><button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.faint,fontSize:12}}>✕</button></td></tr>)}</tbody></table><div style={{display:"flex",gap:6,marginTop:8}}><Btn onClick={addRow} accent={C.muted} small outlined>+ Row</Btn><Btn onClick={addCol} accent={C.muted} small outlined>+ Col</Btn></div></div>;
 }
-function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}){
-  const {aliases:elemAliases}=useContext(ElemAliasesContext);
-  const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
+function LabReportsModule({dbEntries,reports,setReports,spectraResults,openId,onOpened,onNavigate,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}){
+  const {aliases:elemAliases}=useContext(ElementsContext);
   const [sel,setSel]=useState(null);const [mode,setMode]=useState("view");const [draft,setDraft]=useState(null);
   const [showLink,setShowLink]=useState(false);const [aiLoading,setAiLoading]=useState(false);
   const [showDetail,setShowDetail]=useState(false);
@@ -2223,7 +2335,6 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
   const [suggestData,setSuggestData]=useState(null);
   const [manualLinkOpen,setManualLinkOpen]=useState(false);
   const isMobile=useIsMobile();
-  const spectraResults=spectraResultsRef?.current||[];
   const startNew=()=>{setDraft({...BLANK_REPORT(),tagsStr:"",createdBy:username||"",lockedBy:null});setSel(null);setMode("new");setShowDetail(true);};
   const toggleLock=()=>{
     if(!isAdmin||!sel)return;
@@ -2370,15 +2481,18 @@ export default function App() {
   const isAdmin = !!username && username.trim().toLowerCase()===ADMIN_NAME.toLowerCase();
   const [tab,setTab]=useState("table");
   const [sidebarOpen,setSidebarOpen]=useState(false);
-  const addToDbRef=useRef(null);
-  const spectraResultsRef=useRef([]);
   const isMobile=useIsMobile();
 
-  const [dbEntries]=useCloudCollection("db",SEED_DB);
+  // The one copy of each collection — every module gets these as props, so an edit
+  // anywhere shows up everywhere (two owners of the same data drift apart).
+  const [dbEntries,setDbEntries]=useCloudCollection("db",SEED_DB);
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
-  const [nbNotes]=useCloudCollection("notes",SEED_NOTES);
+  const [nbNotes,setNbNotes]=useCloudCollection("notes",SEED_NOTES);
+  const [spectraResults,setSpectraResults]=useCloudCollection("spectra-meta",[]);
+  const addDbEntry=useCallback(e=>{setDbEntries(p=>[e,...p]);logActivity("db","added",e.name,username);},[setDbEntries,username]);
   const [annotations,addAnnotation,removeAnnotation]=useAnnotations();
   const [elemAliases,setElemAliases]=useLS("priabora-elem-aliases",{});
+  const [elemLinks,setElemLinks]=useLS("priabora-elem-links",{});
   const [navTarget,setNavTarget]=useState(null); // {tab, id} — set when navigating to a specific linked entry
   const counts={table:0,db:dbEntries.length,spectrum:0,reports:reports.length,notebook:nbNotes.length};
 
@@ -2407,7 +2521,7 @@ export default function App() {
   if(!username) return <NameGate onSubmit={setUsername}/>;
 
   return (
-    <ElemAliasesContext.Provider value={{aliases:elemAliases,setAliases:setElemAliases}}>
+    <ElementsContext.Provider value={{aliases:elemAliases,setAliases:setElemAliases,links:elemLinks,setLinks:setElemLinks}}>
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:C.bg,color:C.text,overflow:"hidden",position:"relative"}}>
       <GlobalStyles/>
       {changeLog&&changeLog.length>0&&<AdminChangeLogModal activities={changeLog} onClose={closeChangeLog}/>}
@@ -2443,16 +2557,16 @@ export default function App() {
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:isMobile?"14px 14px 80px":"20px 24px",position:"relative"}}>
           {tab==="table"   &&<PeriodicTableModule dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate} openElementN={navTarget?.tab==="table"?navTarget.id:null} onOpened={()=>setNavTarget(null)} username={username}/>}
-          {tab==="db"      &&<DatabaseModule addEntryRef={addToDbRef} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
-          {tab==="spectrum"&&<SpectrumModule saveToDbRef={addToDbRef} spectraResultsRef={spectraResultsRef} dbEntries={dbEntries} reports={reports} setReports={setReports}/>}
-          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} spectraResultsRef={spectraResultsRef} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
-          {tab==="notebook"&&<NotebookModule openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
+          {tab==="db"      &&<DatabaseModule entries={dbEntries} setEntries={setDbEntries} openId={navTarget?.tab==="db"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} reports={reports} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
+          {tab==="spectrum"&&<SpectrumModule onSaveToDb={addDbEntry} setSpectraResults={setSpectraResults} dbEntries={dbEntries} reports={reports} setReports={setReports}/>}
+          {tab==="reports" &&<LabReportsModule dbEntries={dbEntries} reports={reports} setReports={setReports} spectraResults={spectraResults} openId={navTarget?.tab==="reports"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} notes={nbNotes} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
+          {tab==="notebook"&&<NotebookModule notes={nbNotes} setNotes={setNbNotes} openId={navTarget?.tab==="notebook"?navTarget.id:null} onOpened={()=>setNavTarget(null)} onNavigate={handleNavigate} dbEntries={dbEntries} reports={reports} username={username} isAdmin={isAdmin} annotations={annotations} onAddAnnotation={addAnnotation} onRemoveAnnotation={removeAnnotation}/>}
         </div>
       </div>
 
       {/* Mobile bottom tab bar */}
       {isMobile&&<BottomTabBar tab={tab} setTab={setTab} counts={counts}/>}
     </div>
-    </ElemAliasesContext.Provider>
+    </ElementsContext.Provider>
   );
 }
