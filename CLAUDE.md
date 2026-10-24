@@ -27,7 +27,7 @@ There is no test suite. Plain JavaScript/JSX, no TypeScript. `.env` must define 
 - Hosted on Netlify, which auto-deploys from GitHub (`sprout-mex/priabora`) on every push.
 
 ### Layout of App.jsx (top to bottom)
-1. Supabase client, `GlobalStyles`, palette `C`, font constants, category/status constants, `ADMIN_NAME`.
+1. Supabase client, `GlobalStyles`, palette `C`, font constants, category/status constants, `ADMIN_LOGIN` / `ADMIN_DISPLAY`.
 2. Hooks: `useIsMobile`, `useUsername`, the storage hooks, `useSaveStatus`.
 3. Static `ELEMENTS` data and the `EGRID` position lookup. `entriesMentionedIn` and `elementsMentionedIn` find cross-references by matching text.
 4. Backup export/import, `callClaude`, the activity log helpers, and file/image helpers.
@@ -42,7 +42,7 @@ Periodic Table, Reference DB, Lab Reports, Notebook and Spectrum Analyser. Each 
   - `useLS(key, init)`: single keyed values, one row per key in `priabora_data`. Used for categories and subcategories, `elem-note-<n>`, `elem-override-<n>`, and the admin last-seen timestamp.
   - `useCloudCollection(collection, seed)`: arrays of entries (`db`, `reports`, `notes`, `spectra-meta`). Each item is one row in `priabora_items`, keyed by `(collection, item_id)`. On every set it diffs the previous and next arrays and only upserts or deletes the changed items. Every item needs a stable `id` (new entries use `Date.now()`). The localStorage key is `priabora-<collection>`.
   - Backup import and export include only keys that pass `isPriaboraKey` (prefixes `priabora-`, `elem-note-`, `elem-override-`). `COLLECTION_KEYS` maps array keys back to collections. **If you add a new persisted key or collection, update both.**
-- **Identity.** `useUsername` and `NameGate` give each browser a local display name stored in localStorage (`priabora-username`) and never synced. The admin is recognised by a case-insensitive client-side match against `ADMIN_NAME`. This is a soft check, not real auth. Entries carry `createdBy` and `lockedBy`. Locked entries can only be edited, linked or deleted by the admin.
+- **Identity.** `useUsername` and `NameGate` give each browser a local display name stored in localStorage (`priabora-username`) and never synced. The admin types the secret `ADMIN_LOGIN` but appears everywhere as `ADMIN_DISPLAY`. In `App`, `loginName` is the raw stored value and `username` is what gets displayed and attributed. Never show or log `loginName` for the admin. `ADMIN_DISPLAY` is reserved, so `NameGate` refuses it and a stored copy sends the user back to the prompt. This is a soft check, not real auth: the login is visible in the built JavaScript. Entries carry `createdBy` and `lockedBy`. Locked entries can only be edited, linked or deleted by the admin.
 - **Activity log.** `logActivity()` writes add/edit/delete/lock/unlock events to `priabora_activity_log` (fire-and-forget). The admin sees `AdminChangeLogModal` on sign-in with everything since their last visit.
 - **Linking.** Links between modules and the Periodic Table go both ways. `LinkSuggestModal` offers opt-in suggestions at save time (nothing links automatically) as well as manual search linking. Element field edits trigger it too (`offerLinks` in `ElementPanel`). `ElementMentionPills` is a live, read-only scan of the text.
   - Links are stored on whichever side created them: `linkedDbIds` / `linkedReportIds` / `linkedNoteIds` / `linkedElements` on entries, and the shared `priabora-elem-links` value (via `ElementsContext`) for links made from an element.

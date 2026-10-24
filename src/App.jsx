@@ -128,11 +128,13 @@ const mono  = "'Georgia', serif";
 const serif = "'Lora', serif";
 
 // ── Admin identity ─────────────────────────────────────────────────────────
-// Whoever types this exact name (case-insensitive) into the name prompt below
-// gets admin privileges — locking/unlocking entries. This is a client-side-only
-// soft check, not real authentication: fine for a small trusted group, not a
-// real security boundary. Change this to your own secret name.
-const ADMIN_NAME = "marcus brody";
+// Whoever types ADMIN_LOGIN (case-insensitive) into the name prompt below gets
+// admin privileges, and appears everywhere (attribution, locks, activity log,
+// sidebar) as ADMIN_DISPLAY so the login itself is never shown. Nobody else can
+// use ADMIN_DISPLAY as their name. This is a client-side-only soft check, not
+// real authentication: fine for a small trusted group, not a security boundary.
+const ADMIN_LOGIN = "getafix";
+const ADMIN_DISPLAY = "marcus brody";
 
 // ── Sub/superscript typing shortcuts ──────────────────────────────────────────
 // Ctrl/Cmd+Shift+= toggles superscript-typing mode; Ctrl/Cmd+Shift+- toggles subscript.
@@ -954,7 +956,8 @@ function EditableText({value,onSave,placeholder,style,multiline,tag:Tag="div",re
 // ── Name gate: shown once per browser before the app is usable ───────────────
 function NameGate({ onSubmit }) {
   const [val, setVal] = useState("");
-  const submit = () => { if (val.trim()) onSubmit(val.trim()); };
+  const taken = normName(val)===ADMIN_DISPLAY;
+  const submit = () => { if (val.trim() && !taken) onSubmit(val.trim()); };
   return (
     <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, padding: 20 }}>
       <GlobalStyles/>
@@ -966,7 +969,8 @@ function NameGate({ onSubmit }) {
         <p style={{ fontFamily: mono, fontSize: 12, color: C.muted, lineHeight: 1.7 }}>What's your name? This tags anything you add so everyone can see who contributed what.</p>
         <input autoFocus value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} placeholder="Your name…"
           style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px 14px", color: C.text, fontFamily: mono, fontSize: 14, textAlign: "center" }}/>
-        <Btn onClick={submit} accent={C.orange} disabled={!val.trim()}>Continue</Btn>
+        {taken&&<div style={{ fontFamily: mono, fontSize: 11, color: C.red }}>That name is already taken. Please pick another.</div>}
+        <Btn onClick={submit} accent={C.orange} disabled={!val.trim()||taken}>Continue</Btn>
       </div>
     </div>
   );
@@ -1018,30 +1022,105 @@ function BottomTabBar({tab, setTab, counts}) {
 }
 
 // ── Desktop sidebar ───────────────────────────────────────────────────────────
-function Sidebar({tab, setTab, counts, open, onClose, isMobile, username, isAdmin, onSwitchUser}) {
+function Sidebar({tab, setTab, counts, open, onClose, isMobile, username, isAdmin, onSwitchUser, dbEntries, reports, notes, onNavigate}) {
+  const searchProps={dbEntries,reports,notes};
   if (isMobile) {
     return (
       <>
         {open && <div onClick={onClose} className="fade-in" style={{position:"fixed",inset:0,background:"#000000aa",zIndex:150}}/>}
         <div className={open?"slide-in":""} style={{position:"fixed",top:0,left:0,bottom:0,width:260,background:C.surface,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",padding:"20px 0",zIndex:160,transform:open?"translateX(0)":"translateX(-100%)",transition:"transform 0.25s ease"}}>
-          <SidebarContent tab={tab} setTab={id=>{setTab(id);onClose();}} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser}/>
+          <SidebarContent tab={tab} setTab={id=>{setTab(id);onClose();}} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser} {...searchProps} onNavigate={(t,e)=>{onNavigate(t,e);onClose();}}/>
         </div>
       </>
     );
   }
   return (
     <div style={{width:218,flexShrink:0,borderRight:`1px solid ${C.border}`,background:C.surface,display:"flex",flexDirection:"column",padding:"20px 0"}}>
-      <SidebarContent tab={tab} setTab={setTab} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser}/>
+      <SidebarContent tab={tab} setTab={setTab} counts={counts} username={username} isAdmin={isAdmin} onSwitchUser={onSwitchUser} {...searchProps} onNavigate={onNavigate}/>
     </div>
   );
 }
 
-function SidebarContent({tab, setTab, counts, username, isAdmin, onSwitchUser}) {
+// ── Global search (sidebar) ───────────────────────────────────────────────────
+// Searches every module at once: elements (name, symbol, number, aka names), DB
+// entries (names, aka, formula, all text), lab reports and notes. Title matches
+// rank first; text matches show a short snippet. Enter opens the top result.
+const SEARCH_GROUPS=[
+  {type:"table",label:"Periodic Table",color:C.orange},
+  {type:"db",label:"Reference DB",color:C.green},
+  {type:"reports",label:"Lab Reports",color:C.teal},
+  {type:"notebook",label:"Notebook",color:C.purple},
+];
+function searchSnippet(text,q){
+  const i=text.toLowerCase().indexOf(q);if(i<0)return "";
+  const start=Math.max(0,i-25),end=Math.min(text.length,i+q.length+35);
+  return (start>0?"…":"")+text.slice(start,end).replace(/\s+/g," ")+(end<text.length?"…":"");
+}
+// Score: 3 = name starts with q, 2 = name contains q, 1 = aka/formula, 0.5 = body text.
+function scoreMatch(q,names,others,body){
+  const n=names.map(s=>(s||"").toLowerCase());
+  if(n.some(s=>s.startsWith(q)))return {score:3};
+  if(n.some(s=>s.includes(q)))return {score:2};
+  const o=others.find(s=>s&&s.toLowerCase().includes(q));if(o)return {score:1,hint:`aka ${o}`};
+  const b=body.filter(Boolean).join(" \n ");
+  if(b.toLowerCase().includes(q))return {score:0.5,hint:searchSnippet(b,q)};
+  return null;
+}
+function GlobalSearch({dbEntries,reports,notes,onNavigate}){
+  const {aliases:elemAliases}=useContext(ElementsContext);
+  const [q,setQ]=useState("");
+  const [open,setOpen]=useState(false);
+  const query=q.trim().toLowerCase();
+  const results=[];
+  if(query){
+    for(const el of ELEMENTS){
+      const m=String(el.n)===query||el.sym.toLowerCase()===query?{score:3}:scoreMatch(query,[el.name],elementAliases(el,elemAliases),[]);
+      if(m)results.push({type:"table",id:el.n,title:`${el.sym} · ${el.name}`,...m});
+    }
+    for(const e of dbEntries||[]){
+      const m=scoreMatch(query,[e.name],[...(e.aliases||[]),e.properties?.formula],[e.summary,e.history,e.generalInfo,...Object.values(e.sections||{}),(e.tags||[]).join(" ")]);
+      if(m)results.push({type:"db",id:e.id,title:e.name,...m});
+    }
+    for(const r of reports||[]){const m=scoreMatch(query,[r.title],[],reportTexts(r).slice(1));if(m)results.push({type:"reports",id:r.id,title:r.title,...m});}
+    for(const n of notes||[]){const m=scoreMatch(query,[n.title],[],noteTexts(n).slice(1));if(m)results.push({type:"notebook",id:n.id,title:n.title,...m});}
+    results.sort((a,b)=>b.score-a.score);
+  }
+  const PER_GROUP=4;
+  const groups=SEARCH_GROUPS.map(g=>({...g,all:results.filter(r=>r.type===g.type)})).filter(g=>g.all.length);
+  const go=r=>{onNavigate(r.type,{id:r.id});setQ("");setOpen(false);};
+  return (
+    <div style={{position:"relative"}}>
+      <input value={q} onChange={e=>{setQ(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)}
+        onKeyDown={e=>{if(e.key==="Enter"&&results[0]){e.preventDefault();go(results[0]);}if(e.key==="Escape"){setQ("");e.currentTarget.blur();}}}
+        placeholder="⌕ Search everything…" style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:6,padding:"9px 11px",color:C.text,fontFamily:mono,fontSize:12,width:"100%"}}/>
+      {open&&query&&<div className="fade-in" style={{position:"absolute",top:"calc(100% + 6px)",left:0,width:"max(100%, 300px)",maxWidth:"calc(100vw - 32px)",maxHeight:"65vh",overflowY:"auto",background:C.panel,border:`1px solid ${C.borderHi}`,borderRadius:8,boxShadow:"0 12px 32px #00000088",zIndex:200,padding:8}}>
+        {!groups.length?<div style={{fontFamily:mono,fontSize:11,color:C.faint,padding:"10px 6px"}}>Nothing found for “{q.trim()}”.</div>:
+        groups.map(g=>(
+          <div key={g.type} style={{marginBottom:6}}>
+            <div style={{fontFamily:mono,fontSize:9,color:g.color,textTransform:"uppercase",letterSpacing:"0.08em",padding:"6px 6px 4px",display:"flex",justifyContent:"space-between"}}><span>{g.label}</span><span style={{color:C.faint}}>{g.all.length}</span></div>
+            {g.all.slice(0,PER_GROUP).map(r=>(
+              <div key={r.id} onMouseDown={e=>{e.preventDefault();go(r);}} className="hover-row" style={{padding:"7px 8px",borderRadius:5,cursor:"pointer",borderLeft:`2px solid ${g.color}55`}}>
+                <div style={{fontFamily:serif,fontSize:13,color:C.text,fontWeight:600}}>{r.title}</div>
+                {r.hint&&<div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:2,lineHeight:1.5}}>{r.hint}</div>}
+              </div>
+            ))}
+            {g.all.length>PER_GROUP&&<div style={{fontFamily:mono,fontSize:9,color:C.faint,padding:"2px 8px"}}>+{g.all.length-PER_GROUP} more — keep typing to narrow down</div>}
+          </div>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
+function SidebarContent({tab, setTab, counts, username, isAdmin, onSwitchUser, dbEntries, reports, notes, onNavigate}) {
   return (
     <>
-      <div style={{padding:"0 20px 24px"}}>
+      <div style={{padding:"0 20px 14px"}}>
         <div style={{fontFamily:serif,fontSize:21,fontWeight:700,color:C.text}}>Pria<span style={{color:C.orange}}>bora</span></div>
         <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:2,letterSpacing:"0.07em"}}>PRIABORA · CHEMISTRY SUITE</div>
+      </div>
+      <div style={{padding:"0 12px 18px"}}>
+        <GlobalSearch dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       </div>
       <div style={{flex:1,padding:"0 10px",display:"flex",flexDirection:"column",gap:3}}>
         {NAV.map(n=>{const active=tab===n.id;return(
@@ -1060,13 +1139,16 @@ function SidebarContent({tab, setTab, counts, username, isAdmin, onSwitchUser}) 
           </div>
           <button onClick={onSwitchUser} style={{background:"none",border:"none",color:C.faint,fontFamily:mono,fontSize:9,textDecoration:"underline",padding:0,flexShrink:0}}>switch</button>
         </div>
-        <div style={{fontFamily:mono,fontSize:9,color:C.faint,lineHeight:1.6}}>Synced to cloud.</div>
-        <div style={{display:"flex",gap:6}}>
-          <Btn onClick={exportAllData} accent={C.teal} small outlined full>Export</Btn>
-          <label style={{flex:1,cursor:"pointer"}}>
-            <input type="file" accept="application/json" style={{display:"none"}} onChange={e=>{if(e.target.files[0])importAllData(e.target.files[0]);e.target.value="";}}/>
-            <span style={{display:"block"}}><Btn accent={C.purple} small outlined full>Import</Btn></span>
-          </label>
+        {/* Backup = export everything to a file. Restore (import, overwrites everyone's
+            data) is admin-only so nobody can wipe the shared data by accident. */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,fontFamily:mono,fontSize:9,color:C.faint,lineHeight:1.6}}>
+          <span>Synced to cloud.</span>
+          <span style={{display:"flex",gap:8}}>
+            <button onClick={exportAllData} title="Download a backup file of all data" style={{background:"none",border:"none",color:C.faint,fontFamily:mono,fontSize:9,textDecoration:"underline",padding:0}}>backup</button>
+            {isAdmin&&<label title="Restore from a backup file — overwrites current data" style={{color:C.faint,textDecoration:"underline",cursor:"pointer"}}>
+              <input type="file" accept="application/json" style={{display:"none"}} onChange={e=>{if(e.target.files[0])importAllData(e.target.files[0]);e.target.value="";}}/>restore
+            </label>}
+          </span>
         </div>
       </div>
     </>
@@ -2511,8 +2593,12 @@ function LabReportsModule({dbEntries,reports,setReports,spectraResults,openId,on
 // ROOT APP
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [username,setUsername]=useUsername();
-  const isAdmin = !!username && username.trim().toLowerCase()===ADMIN_NAME.toLowerCase();
+  const [loginName,setUsername]=useUsername();
+  const isAdmin = !!loginName && normName(loginName)===ADMIN_LOGIN;
+  // The admin's display name is reserved, so a stored "marcus brody" (e.g. from
+  // before the login changed) goes back to the name prompt instead of posing as admin.
+  const nameReserved = !!loginName && !isAdmin && normName(loginName)===ADMIN_DISPLAY;
+  const username = isAdmin ? ADMIN_DISPLAY : nameReserved ? "" : loginName;
   const [tab,setTab]=useState("table");
   const [sidebarOpen,setSidebarOpen]=useState(false);
   const isMobile=useIsMobile();
@@ -2583,10 +2669,10 @@ export default function App() {
       {/* Body */}
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
         {/* Desktop sidebar */}
-        {!isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={false} onClose={()=>{}} isMobile={false} username={username} isAdmin={isAdmin} onSwitchUser={switchUser}/>}
+        {!isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={false} onClose={()=>{}} isMobile={false} username={username} isAdmin={isAdmin} onSwitchUser={switchUser} dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate}/>}
 
         {/* Mobile drawer */}
-        {isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={sidebarOpen} onClose={()=>setSidebarOpen(false)} isMobile={true} username={username} isAdmin={isAdmin} onSwitchUser={switchUser}/>}
+        {isMobile&&<Sidebar tab={tab} setTab={setTab} counts={counts} open={sidebarOpen} onClose={()=>setSidebarOpen(false)} isMobile={true} username={username} isAdmin={isAdmin} onSwitchUser={switchUser} dbEntries={dbEntries} reports={reports} notes={nbNotes} onNavigate={handleNavigate}/>}
 
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:isMobile?"14px 14px 80px":"20px 24px",position:"relative"}}>
