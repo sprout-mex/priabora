@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, createContext, useContext } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ── Supabase (cloud data layer) ───────────────────────────────────────────────
@@ -359,29 +359,39 @@ ELEMENTS.forEach(e => { if(!EGRID[e.period]) EGRID[e.period]={}; EGRID[e.period]
 // Finds which items in a list (DB entries / Reports / Notebook entries) are textually
 // mentioned by name/title in arbitrary text — same word-bounded matching as element
 // detection. excludeId lets an entry skip matching itself when scanning its own list.
+// DB entries also match on their "aka" names (item.aliases).
 function entriesMentionedIn(list, nameKey, excludeId, ...parts) {
   const combined = parts.filter(Boolean).join(" \n ");
   if (!combined || !list) return [];
   return list.filter(item => {
     if (excludeId != null && item.id === excludeId) return false;
-    const label = item[nameKey];
-    if (!label || !label.trim()) return false;
-    const re = new RegExp(`\\b${_escRe(label.trim())}\\b`, "i");
-    return re.test(combined);
+    const labels = [item[nameKey], ...(item.aliases||[]).filter(a=>a.trim().length>=MIN_ALIAS_MATCH)].filter(l=>l&&l.trim());
+    return labels.some(label => new RegExp(`\\b${_escRe(label.trim())}\\b`, "i").test(combined));
   });
 }
+
+// ── Other names ("aka") ───────────────────────────────────────────────────────
+// DB entries keep theirs on the entry (entry.aliases). Element ones are keyed by
+// element number in one "priabora-elem-aliases" value, owned by App and shared
+// through this context so every module's name matching sees the same list.
+const ElemAliasesContext = createContext({aliases:{},setAliases:()=>{}});
+const MIN_ALIAS_MATCH = 3; // shorter aka names are too likely to false-match in text
+const normName = s => s.trim().replace(/\s+/g," ").toLowerCase();
+const entryNames = e => [e.name,...(e.aliases||[])].filter(n=>n&&n.trim());
+const elementAliases = (el,aliases) => (aliases||{})[el.n]||[];
 
 // Finds which periodic-table elements are mentioned in arbitrary text (name or symbol),
 // using the same word-bounded logic as ElementPanel's own linking (avoids false positives
 // like "Li" inside "nucleophilic", but still catches formula-style text like "LiCl").
 const _escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-function elementsMentionedIn(...parts) {
+// `aliases` = the element aka names from ElemAliasesContext.
+function elementsMentionedIn(aliases, ...parts) {
   const combined = parts.filter(Boolean).join(" \n ");
   if (!combined) return [];
   return ELEMENTS.filter(el => {
-    const nameRe = new RegExp(`\\b${_escRe(el.name)}\\b`, "i");
+    const names = [el.name, ...elementAliases(el,aliases).filter(a=>a.trim().length>=MIN_ALIAS_MATCH)];
     const symRe = new RegExp(`(?<![A-Za-z])${_escRe(el.sym)}(?![a-z])`);
-    return nameRe.test(combined) || symRe.test(combined);
+    return names.some(n => new RegExp(`\\b${_escRe(n.trim())}\\b`, "i").test(combined)) || symRe.test(combined);
   });
 }
 
@@ -784,6 +794,18 @@ function splitTitleColor(text){
   const whiteLen=Math.floor(n/2);
   return {white:(text||"").slice(0,whiteLen),orange:(text||"").slice(whiteLen),joiner:""};
 }
+// Faint "aka …" line under an entry's title: the first couple of other names, the
+// rest behind "+N more" so long synonym lists don't clutter the panel.
+function AkaLine({names,show=2}){
+  const [open,setOpen]=useState(false);
+  if(!names?.length)return null;
+  return (
+    <div style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.6,marginTop:-8}}>
+      <span style={{color:C.faint,fontStyle:"italic"}}>aka </span>{(open?names:names.slice(0,show)).join(" · ")}
+      {names.length>show&&<button onClick={()=>setOpen(o=>!o)} style={{background:"none",border:"none",color:C.faint,fontFamily:mono,fontSize:11,padding:0,marginLeft:6,borderBottom:`1px dashed ${C.border}`}}>{open?"less":`+${names.length-show} more`}</button>}
+    </div>
+  );
+}
 function TwoToneTitle({text,style}){
   const {white,orange,joiner}=splitTitleColor(text);
   return <span style={style}>{white&&<span style={{color:C.text}}>{white}</span>}{joiner}<span style={{color:C.orange}}>{orange}</span></span>;
@@ -1098,10 +1120,11 @@ function LinkSuggestModal({elements=[],dbEntries=[],reports=[],notes=[],allDbEnt
   const shownRepIds=new Set([...reports.map(e=>e.id),...manualRep.map(e=>e.id)]);
   const shownNoteIds=new Set([...notes.map(e=>e.id),...manualNote.map(e=>e.id)]);
 
+  const {aliases:elemAliases}=useContext(ElemAliasesContext);
   const q=search.trim().toLowerCase();
   const searchResults = q.length>0 ? {
-    el: ELEMENTS.filter(e=>!shownElIds.has(e.n)&&(e.name.toLowerCase().includes(q)||e.sym.toLowerCase().includes(q))).slice(0,6),
-    db: allDbEntries.filter(e=>!shownDbIds.has(e.id)&&e.name.toLowerCase().includes(q)).slice(0,6),
+    el: ELEMENTS.filter(e=>!shownElIds.has(e.n)&&([e.name,...elementAliases(e,elemAliases)].some(n=>n.toLowerCase().includes(q))||e.sym.toLowerCase().includes(q))).slice(0,6),
+    db: allDbEntries.filter(e=>!shownDbIds.has(e.id)&&entryNames(e).some(n=>n.toLowerCase().includes(q))).slice(0,6),
     rep: allReports.filter(e=>!shownRepIds.has(e.id)&&e.title.toLowerCase().includes(q)).slice(0,6),
     note: allNotes.filter(e=>!shownNoteIds.has(e.id)&&e.title.toLowerCase().includes(q)).slice(0,6),
   } : null;
@@ -1395,11 +1418,14 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
     return <div key={f.id}><SLabel accent={fc}>{f.label}</SLabel>{body}</div>;
   };
   const escapeRe=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-  const nameRe=new RegExp(`\\b${escapeRe(el.name)}\\b`,"i");
+  const {aliases:elemAliases,setAliases:setElemAliases}=useContext(ElemAliasesContext);
+  const myAliases=elementAliases(el,elemAliases);
+  const saveAliases=v=>{setElemAliases(p=>({...p,[el.n]:splitArr(v)}));logActivity("table","edited",`${el.name} — other names`,username);};
+  const nameRes=[el.name,...myAliases.filter(a=>a.trim().length>=MIN_ALIAS_MATCH)].map(n=>new RegExp(`\\b${escapeRe(n.trim())}\\b`,"i"));
   // Symbol match: not embedded inside a longer word (e.g. "Li" inside "Literature" or "alkaLI"),
   // but still matches formula-style concatenation like "LiCl" or "Li2CO3".
   const symRe=new RegExp(`(?<![A-Za-z])${escapeRe(el.sym)}(?![a-z])`);
-  const matches=t=>t&&(nameRe.test(t)||symRe.test(t));
+  const matches=t=>t&&(nameRes.some(re=>re.test(t))||symRe.test(t));
   const linkedDb=dbEntries.filter(e=>matches(e.name)||matches(e.summary)||e.tags?.some(t=>matches(t)));
   const linkedReports=reports.filter(r=>matches(r.title)||matches(r.method)||matches(r.results)||matches(r.discussion)||r.tags?.some(t=>matches(t)));
   const linkedNotes=notes.filter(n=>matches(n.title)||matches(n.content)||n.tags?.some(t=>matches(t)));
@@ -1436,6 +1462,9 @@ function ElementPanel({el,dbEntries,reports,notes,onNavigate,onClose,username}) 
           </div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}>{el.name}</div>
+            <EditableText value={joinArr(myAliases)} onSave={saveAliases} placeholder="Other names, comma-separated…"
+              renderDisplay={v=>v?<span><span style={{color:C.faint,fontStyle:"italic"}}>aka </span>{splitArr(v).join(" · ")}</span>:<span style={{color:C.faint,fontStyle:"italic"}}>+ other names</span>}
+              style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:1}}/>
             <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>
               <Pill label={ELEM_CAT_LABELS[el.cat]||el.cat} color={col} small/>
               <Pill label={`Period ${[8,9].includes(el.period)?el.period===8?"6":"7":el.period}`} color={C.muted} small/>
@@ -1534,7 +1563,8 @@ function PeriodicTableModule({dbEntries,reports,notes,onNavigate,openElementN,on
   const allGroups=Array.from({length:18},(_,i)=>i+1);
   const mainRows=[1,2,3,4,5,6,7];
   const seriesRows=[8,9];
-  const matchSearch=el=>{const q=search.toLowerCase();return !q||el.name.toLowerCase().includes(q)||el.sym.toLowerCase().includes(q)||String(el.n).includes(q);};
+  const {aliases:elemAliases}=useContext(ElemAliasesContext);
+  const matchSearch=el=>{const q=search.toLowerCase();return !q||el.name.toLowerCase().includes(q)||el.sym.toLowerCase().includes(q)||String(el.n).includes(q)||elementAliases(el,elemAliases).some(a=>a.toLowerCase().includes(q));};
   const dim=el=>(filterCat?el.cat!==filterCat:false)||!matchSearch(el);
   const renderTile=(period,group)=>{const el=EGRID[period]?.[group];if(!el)return <div key={`${period}-${group}`} style={{width:TILE,height:TILE,flexShrink:0}}/>;return <ElementTile key={el.n} el={el} selected={selected?.n===el.n} dimmed={dim(el)} onClick={handleSelect} size={TILE}/>;};
   const panelContent = selected ? <ElementPanel key={selected.n} el={selected} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate} onClose={isMobile?()=>setShowPanel(false):null} username={username}/> : null;
@@ -1633,7 +1663,7 @@ function FieldPicker({defs,setDefs,ids,following,onChange,onUseStandard,groups,n
   const toggleStandard=id=>setDefs(p=>p.map(f=>f.id===id?{...f,standard:!f.standard}:f));
   // Creates the field (or reuses one with the same name, ignoring case and extra
   // spaces, so it can't be doubled up) and returns its id.
-  const norm=s=>s.trim().replace(/\s+/g," ").toLowerCase();
+  const norm=normName;
   const addField=(rawLabel,g,standard)=>{
     const label=rawLabel.trim().replace(/\s+/g," ");
     const existing=defs.find(f=>f.kind===g.kind&&norm(f.label)===norm(label));
@@ -1726,6 +1756,7 @@ function PhotoPicker({photos,onChange,entryId}){
 // DATABASE MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
+  const {aliases:elemAliases}=useContext(ElemAliasesContext);
   const [entries,setEntries]=useCloudCollection("db",SEED_DB);
   const [pendingSave,setPendingSave]=useState(null);
   const [suggestData,setSuggestData]=useState(null);
@@ -1765,13 +1796,24 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
     if(e?.lockedBy&&!isAdmin&&!fromAdminLockAction)return; // locked entries can't be edited by non-admins
     setEntries(p=>p.map(x=>x.id===id?{...x,...patch}:x));setSelected(p=>p&&p.id===id?{...p,...patch}:p);
   };
-  const filtered=entries.filter(e=>{const mc=filterCat==="All"||getEntryCats(e).includes(filterCat);const q=search.toLowerCase();return mc&&(!q||e.name.toLowerCase().includes(q)||e.summary.toLowerCase().includes(q)||e.tags.some(t=>t.includes(q)));});
+  const q=search.trim().toLowerCase();
+  // When an entry turns up in search only because of an aka name or its formula,
+  // returns that name so the card can say why it matched.
+  const otherNameHit=e=>{
+    if(!q||e.name.toLowerCase().includes(q))return null;
+    const hit=(e.aliases||[]).find(a=>a.toLowerCase().includes(q));if(hit)return hit;
+    const f=e.properties?.formula;return f&&f.toLowerCase().includes(q)?f:null;
+  };
+  const filtered=entries.filter(e=>{const mc=filterCat==="All"||getEntryCats(e).includes(filterCat);return mc&&(!q||e.name.toLowerCase().includes(q)||e.summary.toLowerCase().includes(q)||e.tags.some(t=>t.includes(q))||otherNameHit(e));});
+  // Other entries that already use one of the draft's names (warned about, not blocked).
+  const draftNorms=draft?[draft.name,...(draft.aliasesStr||"").split(",")].map(normName).filter(Boolean):[];
+  const dupes=draft?entries.filter(e=>e.id!==draft.id&&entryNames(e).some(n=>draftNorms.includes(normName(n)))):[];
 
   const addCategory=()=>{const label=newCatDraft.trim();if(!label){setAddingCat(false);return;}if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setAddingCat(false);setNewCatDraft("");};
 
-  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},sections:{},fields:"standard",date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null,status:"in-progress"});
+  const BLANK_DB_ENTRY=()=>({id:Date.now(),name:"",aliasesStr:"",summary:"",tagsStr:"",categories:[],subcategories:[],links:[],photos:[],history:"",generalInfo:"",properties:{},sections:{},fields:"standard",date:new Date().toISOString().split("T")[0],createdBy:username||"",lockedBy:null,status:"in-progress"});
   const startNew=()=>{setDraft(BLANK_DB_ENTRY());setSelected(null);setMode("new");setShowDetail(true);};
-  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{},status:selected.status||"in-progress"});setMode("edit");};
+  const startEdit=()=>{setDraft({...selected,tagsStr:(selected.tags||[]).join(", "),aliasesStr:(selected.aliases||[]).join(", "),categories:getEntryCats(selected),subcategories:getEntrySubs(selected),links:selected.links||[],photos:selected.photos||[],properties:selected.properties||{},status:selected.status||"in-progress"});setMode("edit");};
   const toggleCat=id=>setDraft(d=>({...d,categories:d.categories.includes(id)?d.categories.filter(x=>x!==id):[...d.categories,id]}));
   const toggleSub=id=>setDraft(d=>({...d,subcategories:d.subcategories.includes(id)?d.subcategories.filter(x=>x!==id):[...d.subcategories,id]}));
   const addNewCategoryToDraft=label=>{if(!categories.some(c=>c.id===label)){const color=CAT_PALETTE[categories.length%CAT_PALETTE.length];setCategories(p=>[...p,{id:label,label,color}]);}setDraft(d=>d.categories.includes(label)?d:{...d,categories:[...d.categories,label]});};
@@ -1783,10 +1825,10 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   };
   const saveEntry=()=>{
     if(!draft.name.trim())return;
-    const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
-    delete saved.tagsStr; delete saved.category;
-    const text=[saved.name,saved.summary,...visibleSectionTexts(saved,dbFields),(saved.tags||[]).join(" ")];
-    const els=elementsMentionedIn(...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
+    const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean),aliases:(draft.aliasesStr||"").split(",").map(a=>a.trim().replace(/\s+/g," ")).filter(Boolean)};
+    delete saved.tagsStr; delete saved.aliasesStr; delete saved.category;
+    const text=[saved.name,saved.aliases.join(" \n "),saved.summary,...visibleSectionTexts(saved,dbFields),(saved.tags||[]).join(" ")];
+    const els=elementsMentionedIn(elemAliases,...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
     const dbM=entriesMentionedIn(entries,"name",saved.id,...text).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
     const repM=entriesMentionedIn(reports,"title",null,...text).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
     const noteM=entriesMentionedIn(notes,"title",null,...text).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
@@ -1826,6 +1868,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>{getEntryCats(selected).map(cid=><Pill key={cid} label={categories.find(c=>c.id===cid)?.label||cid} color={catColor(cid,categories)}/>)}<LockBadge lockedBy={selected.lockedBy}/></div>
       <EditableText value={selected.name} onSave={v=>updateEntry(selected.id,{name:v})} readOnly={!dbCanEdit} placeholder="Entry name…" style={{fontFamily:serif,fontSize:18,color:C.text,fontWeight:700}}/>
+      <AkaLine names={selected.aliases}/>
       <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
       <div style={{borderLeft:`3px solid ${catColor(getEntryCats(selected)[0],categories)}${STATUS_OPACITY[selected.status||"in-progress"]}`,paddingLeft:12}}>
         <AnnotatableText text={selected.summary} anns={annotations} entryType="db" entryId={selected.id} field="summary" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.green} placeholder="Summary…" style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}/>
@@ -1838,7 +1881,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
           <AnnotatableText text={getSectionText(selected,f.id)} anns={annotations} entryType="db" entryId={selected.id} field={f.id} username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={f.color} placeholder={`Click to add ${f.label.toLowerCase()}…`} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8,borderLeft:`3px solid ${f.color}44`,paddingLeft:12}}/>
         </div>
       ))}
-      <ElementMentionPills elements={elementsMentionedIn(selected.name,selected.summary,...visibleSectionTexts(selected,dbFields),(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
+      <ElementMentionPills elements={elementsMentionedIn(elemAliases,selected.name,(selected.aliases||[]).join(" \n "),selected.summary,...visibleSectionTexts(selected,dbFields),(selected.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={selected} dbEntries={entries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {selected.links?.filter(l=>l.url).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{selected.links.filter(l=>l.url).map(l=><a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:mono,fontSize:11,color:C.blue,textDecoration:"none",borderBottom:`1px dashed ${C.blue}55`,width:"fit-content"}}>🔗 {l.label||l.url}</a>)}</div>}
       {selected.photos?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{selected.photos.map(p=><img key={p.id} src={p.url||p.dataUrl} alt="" onClick={()=>window.open(p.url||p.dataUrl,"_blank")} style={{width:74,height:74,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"zoom-in"}}/>)}</div>}
@@ -1855,6 +1898,8 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
   const editContent=draft&&(mode==="new"||mode==="edit")&&(
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <Input value={draft.name} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} placeholder="Entry name…" style={{fontFamily:serif,fontSize:14}}/>
+      <Input value={draft.aliasesStr||""} onChange={e=>setDraft(d=>({...d,aliasesStr:e.target.value}))} placeholder="Also known as (comma-separated)… e.g. caustic soda, lye"/>
+      {dupes.length>0&&<div style={{fontFamily:mono,fontSize:10,color:C.yellow,background:C.yellow+"12",border:`1px solid ${C.yellow}33`,borderRadius:5,padding:"7px 10px",lineHeight:1.6}}>⚠ Already in the DB as {dupes.map(e=>`“${e.name}”`).join(", ")}. You can still save if this is something different.</div>}
       <Textarea value={draft.summary} onChange={e=>setDraft(d=>({...d,summary:e.target.value}))} placeholder="Summary…" rows={4}/>
       <Input value={draft.tagsStr} onChange={e=>setDraft(d=>({...d,tagsStr:e.target.value}))} placeholder="Tags (comma-separated)…"/>
       <div><SLabel accent={C.blue}>Status</SLabel><StatusPicker status={draft.status} onChange={s=>setDraft(d=>({...d,status:s}))}/></div>
@@ -1906,6 +1951,7 @@ function DatabaseModule({addEntryRef,openId,onOpened,onNavigate,reports,notes,us
                 <LockBadge lockedBy={e.lockedBy} small/>
               </div>
             </div>
+            {otherNameHit(e)&&<div style={{fontFamily:mono,fontSize:10,color:C.faint,fontStyle:"italic",marginTop:-2,marginBottom:5}}>matched “{otherNameHit(e)}”</div>}
             <p style={{fontFamily:mono,fontSize:11,color:C.muted,lineHeight:1.6,marginBottom:7,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{e.summary}</p>
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{e.tags.map(t=><Pill key={t} label={t} color={C.faint} small/>)}{e.photos?.length>0&&<Pill label={`📷 ${e.photos.length}`} color={C.faint} small/>}{e.links?.filter(l=>l.url).length>0&&<Pill label={`🔗 ${e.links.filter(l=>l.url).length}`} color={C.faint} small/>}</div>
           </div>
@@ -1994,6 +2040,7 @@ function SpectrumModule({saveToDbRef,spectraResultsRef,dbEntries,reports,setRepo
 // NOTEBOOK MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}) {
+  const {aliases:elemAliases}=useContext(ElemAliasesContext);
   const [notes,setNotes]=useCloudCollection("notes",SEED_NOTES);
   const [categories,setCategories]=useLS("priabora-categories",DEFAULT_CATEGORIES);
   const [sel,setSel]=useState(null);const [editing,setEditing]=useState(false);const [creating,setCreating]=useState(false);
@@ -2030,7 +2077,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
   };
   const stageSave=(n,kind)=>{
     const text=[n.title,n.content,(n.tags||[]).join(" ")];
-    const els=elementsMentionedIn(...text).filter(el=>!(n.linkedElements||[]).includes(el.n));
+    const els=elementsMentionedIn(elemAliases,...text).filter(el=>!(n.linkedElements||[]).includes(el.n));
     const dbM=entriesMentionedIn(dbEntries,"name",null,...text).filter(e=>!(n.linkedDbIds||[]).includes(e.id));
     const repM=entriesMentionedIn(reports,"title",null,...text).filter(r=>!(n.linkedReportIds||[]).includes(r.id));
     const noteM=entriesMentionedIn(notes,"title",n.id,...text).filter(x=>!(n.linkedNoteIds||[]).includes(x.id));
@@ -2098,7 +2145,7 @@ function NotebookModule({openId,onOpened,onNavigate,dbEntries,reports,username,i
         {sel.tags?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{sel.tags.map(t=><Pill key={t} label={t} color={C.purple} small/>)}</div>}
         <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
         <AnnotatableText tag="div" text={sel.content} anns={annotations} entryType="notebook" entryId={sel.id} field="content" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.purple} style={{fontFamily:mono,fontSize:15,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap",borderLeft:`3px solid ${C.border}`,paddingLeft:12}}/>
-        <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.content,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
+        <ElementMentionPills elements={elementsMentionedIn(elemAliases,sel.title,sel.content,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
         <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
         {sel.aiSummary?<Card style={{padding:14,border:`1px solid ${C.purple}33`,borderLeft:`3px solid ${C.purple}`}}><SLabel accent={C.purple}>AI Summary</SLabel><p style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.8}}>{sel.aiSummary}</p></Card>:<Btn onClick={aiSummarise} disabled={aiLoading} accent={C.purple} small full>{aiLoading?"Summarising…":"✦ Get AI tutor summary"}</Btn>}
       </>;})()}
@@ -2167,6 +2214,7 @@ function DataTableEditor({table,onChange}){
   return<div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{border:`1px solid ${C.border}`,padding:0}}><input value={cell} onChange={e=>setCell(i,j,e.target.value)} onKeyDown={e=>handleScriptKeyDown(e,cell,ev=>setCell(i,j,ev.target.value))} style={{background:i===0?C.surface+"cc":C.surface,border:"none",padding:"8px 9px",color:i===0?C.text:C.muted,fontFamily:mono,fontSize:11,fontWeight:i===0?600:400,width:"100%",minWidth:80}}/></td>)}<td style={{padding:"0 4px"}}><button onClick={()=>removeRow(i)} style={{background:"none",border:"none",color:C.faint,fontSize:12}}>✕</button></td></tr>)}</tbody></table><div style={{display:"flex",gap:6,marginTop:8}}><Btn onClick={addRow} accent={C.muted} small outlined>+ Row</Btn><Btn onClick={addCol} accent={C.muted} small outlined>+ Col</Btn></div></div>;
 }
 function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigate,notes,username,isAdmin,annotations,onAddAnnotation,onRemoveAnnotation}){
+  const {aliases:elemAliases}=useContext(ElemAliasesContext);
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [sel,setSel]=useState(null);const [mode,setMode]=useState("view");const [draft,setDraft]=useState(null);
   const [showLink,setShowLink]=useState(false);const [aiLoading,setAiLoading]=useState(false);
@@ -2201,7 +2249,7 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
     const saved={...draft,tags:draft.tagsStr.split(",").map(t=>t.trim()).filter(Boolean)};
     delete saved.tagsStr;
     const text=[saved.title,saved.method,saved.results,saved.discussion,saved.conclusion,(saved.tags||[]).join(" ")];
-    const els=elementsMentionedIn(...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
+    const els=elementsMentionedIn(elemAliases,...text).filter(el=>!(saved.linkedElements||[]).includes(el.n));
     const dbM=entriesMentionedIn(dbEntries,"name",null,...text).filter(e=>!(saved.linkedDbIds||[]).includes(e.id));
     const repM=entriesMentionedIn(reports,"title",saved.id,...text).filter(r=>!(saved.linkedReportIds||[]).includes(r.id));
     const noteM=entriesMentionedIn(notes,"title",null,...text).filter(n=>!(saved.linkedNoteIds||[]).includes(n.id));
@@ -2260,7 +2308,7 @@ function LabReportsModule({dbEntries,spectraResultsRef,openId,onOpened,onNavigat
       </div>
       <div style={{fontFamily:mono,fontSize:9,color:C.faint}}>💡 Select any text below to add a note.</div>
       {(linkedDb.length>0||linkedSp.length>0)&&<Card style={{padding:12}}><SLabel accent={C.teal}>Linked Entries</SLabel><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{linkedDb.map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:6,background:C.green+"12",border:`1px solid ${C.green}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.green,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{e.name}</span></div>)}{linkedSp.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",gap:6,background:C.blue+"12",border:`1px solid ${C.blue}30`,borderRadius:6,padding:"5px 9px"}}><span style={{width:5,height:5,borderRadius:"50%",background:C.blue,display:"inline-block"}}/><span style={{fontFamily:mono,fontSize:10,color:C.muted}}>{s.name}</span></div>)}</div></Card>}
-      <ElementMentionPills elements={elementsMentionedIn(sel.title,sel.method,sel.results,sel.discussion,sel.conclusion,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
+      <ElementMentionPills elements={elementsMentionedIn(elemAliases,sel.title,sel.method,sel.results,sel.discussion,sel.conclusion,(sel.tags||[]).join(" "))} onNavigate={onNavigate}/>
       <LinkedEntriesDisplay entry={sel} dbEntries={dbEntries} reports={reports} notes={notes} onNavigate={onNavigate}/>
       {sel.method&&<Card style={{padding:14}}><SLabel accent={C.purple}>Method</SLabel><AnnotatableText text={sel.method} anns={annotations} entryType="reports" entryId={sel.id} field="method" username={username} onAdd={onAddAnnotation} onRemove={onRemoveAnnotation} accent={C.purple} style={{fontFamily:mono,fontSize:12,color:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}/></Card>}
       {sel.dataTable?.length>0&&<Card style={{padding:14}}><SLabel accent={C.yellow}>Raw Data</SLabel><div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontFamily:mono,fontSize:11,width:"100%"}}><tbody>{sel.dataTable.map((row,i)=><tr key={i} style={{background:i===0?C.surface+"aa":"transparent"}}>{row.map((cell,j)=><td key={j} style={{padding:"8px 10px",color:i===0?C.text:C.muted,fontWeight:i===0?600:400,border:`1px solid ${C.border}30`}}>{cell}</td>)}</tr>)}</tbody></table></div></Card>}
@@ -2330,6 +2378,7 @@ export default function App() {
   const [reports,setReports]=useCloudCollection("reports",SEED_REPORTS);
   const [nbNotes]=useCloudCollection("notes",SEED_NOTES);
   const [annotations,addAnnotation,removeAnnotation]=useAnnotations();
+  const [elemAliases,setElemAliases]=useLS("priabora-elem-aliases",{});
   const [navTarget,setNavTarget]=useState(null); // {tab, id} — set when navigating to a specific linked entry
   const counts={table:0,db:dbEntries.length,spectrum:0,reports:reports.length,notebook:nbNotes.length};
 
@@ -2358,6 +2407,7 @@ export default function App() {
   if(!username) return <NameGate onSubmit={setUsername}/>;
 
   return (
+    <ElemAliasesContext.Provider value={{aliases:elemAliases,setAliases:setElemAliases}}>
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:C.bg,color:C.text,overflow:"hidden",position:"relative"}}>
       <GlobalStyles/>
       {changeLog&&changeLog.length>0&&<AdminChangeLogModal activities={changeLog} onClose={closeChangeLog}/>}
@@ -2403,5 +2453,6 @@ export default function App() {
       {/* Mobile bottom tab bar */}
       {isMobile&&<BottomTabBar tab={tab} setTab={setTab} counts={counts}/>}
     </div>
+    </ElemAliasesContext.Provider>
   );
 }
